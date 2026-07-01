@@ -21,10 +21,19 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.prowin.prowincrmv2"
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "e28b14e5-f9ac-4c27-beca-5f2e69a32a25"
+      }
+    },
+    "plugins": [
+      "expo-font"
+    ]
   }
 }
