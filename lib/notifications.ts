@@ -37,7 +37,7 @@ export async function registerForPushNotifications(): Promise<string | null> {
 
 // ─── Daily 10:00 AM clock-in reminder ───────────────────────────────────────
 export async function scheduleDailyClockIn() {
-  await Notifications.cancelAllScheduledNotificationsAsync();
+  await Notifications.cancelScheduledNotificationAsync('daily-clockin');
   await Notifications.scheduleNotificationAsync({
     content: {
       title: '⏰ Prowin CRM — Clock In',
@@ -50,7 +50,50 @@ export async function scheduleDailyClockIn() {
       minute: 0,
       repeats: true,
     },
+    identifier: 'daily-clockin',
   });
+}
+
+// ─── Cold-call follow-up reminder ───────────────────────────────────────────
+export async function scheduleFollowUpReminder(
+  contactId: string,
+  contactName: string,
+  phone: string | null,
+  followUpAt: Date,
+) {
+  if (followUpAt <= new Date()) return;
+
+  const { status: existing } = await Notifications.getPermissionsAsync();
+  if (existing !== 'granted') {
+    const { status } = await Notifications.requestPermissionsAsync();
+    if (status !== 'granted') return;
+  }
+
+  if (Platform.OS === 'android') {
+    await Notifications.setNotificationChannelAsync('followups', {
+      name: 'Follow-up Reminders',
+      importance: Notifications.AndroidImportance.HIGH,
+      lightColor: '#c0392b',
+    });
+  }
+
+  const identifier = `followup-${contactId}`;
+  await Notifications.cancelScheduledNotificationAsync(identifier);
+
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: '📞 Follow-up call due',
+      body: `Call ${contactName}${phone ? ` · ${phone}` : ''}`,
+      data: { type: 'followup', contactId },
+      sound: true,
+    },
+    trigger: { date: followUpAt },
+    identifier,
+  });
+}
+
+export async function cancelFollowUpReminder(contactId: string) {
+  await Notifications.cancelScheduledNotificationAsync(`followup-${contactId}`);
 }
 
 // ─── Task / meeting reminder ─────────────────────────────────────────────────

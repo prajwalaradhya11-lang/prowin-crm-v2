@@ -1,26 +1,67 @@
 import React from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, ActivityIndicator,
+  View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, STATUS_COLORS } from '../lib/supabase';
+import { getLeadInitials, type LeadNameFields } from '../lib/leadName';
+import { getContactInitials, type ContactNameFields } from '../lib/contactName';
+import { signOut } from '../lib/auth';
 
 // ─── PROWIN HEADER ──────────────────────────────────────────────────────────
 export function ProwinHeader({
   subtitle,
   rightContent,
   onBell,
+  onAvatarPress,
   unreadCount = 0,
   agentInitials = 'PA',
 }: {
   subtitle?: string;
+  /** Extra controls shown before the bell (e.g. add button). Bell + avatar always visible. */
   rightContent?: React.ReactNode;
   onBell?: () => void;
+  onAvatarPress?: () => void;
   unreadCount?: number;
   agentInitials?: string;
 }) {
+  const insets = useSafeAreaInsets();
+  const router = useRouter();
+
+  function handleBell() {
+    if (onBell) {
+      onBell();
+    } else {
+      router.push('/notifications');
+    }
+  }
+
+  function handleAvatarPress() {
+    if (onAvatarPress) {
+      onAvatarPress();
+      return;
+    }
+    Alert.alert('Account', undefined, [
+      {
+        text: 'Log out',
+        style: 'destructive',
+        onPress: async () => {
+          const { error } = await signOut();
+          if (error) {
+            Alert.alert('Logout failed', error.message);
+            return;
+          }
+          router.replace('/(auth)/login');
+        },
+      },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }
+
   return (
-    <View style={s.header}>
+    <View style={[s.header, { paddingTop: insets.top + 8 }]}>
       <View style={s.logoWrap}>
         <View style={s.logoBox}>
           <Text style={s.logoP}>P</Text>
@@ -28,20 +69,18 @@ export function ProwinHeader({
         <View>
           <Text style={s.brandName}>PROWIN</Text>
           <Text style={s.brandSub}>PROPERTIES</Text>
+          {subtitle ? <Text style={s.headerSubtitle}>{subtitle}</Text> : null}
         </View>
       </View>
       <View style={s.headerRight}>
-        {rightContent ?? (
-          <>
-            <TouchableOpacity style={s.bellWrap} onPress={onBell}>
-              <Ionicons name="notifications-outline" size={22} color={COLORS.muted} />
-              {unreadCount > 0 && <View style={s.bellDot} />}
-            </TouchableOpacity>
-            <View style={s.avatar}>
-              <Text style={s.avatarText}>{agentInitials}</Text>
-            </View>
-          </>
-        )}
+        {rightContent}
+        <TouchableOpacity style={s.bellWrap} onPress={handleBell} accessibilityLabel="Notifications">
+          <Ionicons name="notifications-outline" size={22} color={COLORS.muted} />
+          {unreadCount > 0 && <View style={s.bellDot} />}
+        </TouchableOpacity>
+        <TouchableOpacity style={s.avatar} onPress={handleAvatarPress} accessibilityLabel="Account menu">
+          <Text style={s.avatarText}>{agentInitials}</Text>
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -85,12 +124,13 @@ export function AISummary({ text, loading }: { text: string; loading?: boolean }
 
 // ─── ACTION BUTTON ROW ────────────────────────────────────────────────────────
 export function ActionButtons({
-  onCall, onWhatsApp, onEmail, onView,
+  onCall, onWhatsApp, onEmail, onView, emailDisabled,
 }: {
   onCall: () => void;
   onWhatsApp: () => void;
   onEmail: () => void;
   onView: () => void;
+  emailDisabled?: boolean;
 }) {
   return (
     <View style={s.actRow}>
@@ -102,7 +142,11 @@ export function ActionButtons({
         <Ionicons name="logo-whatsapp" size={14} color="#15803d" />
         <Text style={[s.actText, { color: '#15803d' }]}>WhatsApp</Text>
       </TouchableOpacity>
-      <TouchableOpacity style={[s.actBtn, s.actMail]} onPress={onEmail}>
+      <TouchableOpacity
+        style={[s.actBtn, s.actMail, emailDisabled && s.actBtnDisabled]}
+        onPress={onEmail}
+        disabled={emailDisabled}
+      >
         <Ionicons name="mail-outline" size={14} color={COLORS.blue} />
         <Text style={[s.actText, { color: COLORS.blue }]}>Email</Text>
       </TouchableOpacity>
@@ -182,12 +226,65 @@ export function Avatar({ initials, color = COLORS.red }: { initials: string; col
   );
 }
 
+export function LeadAvatar({ lead, color = COLORS.red }: { lead: LeadNameFields; color?: string }) {
+  const initials = getLeadInitials(lead);
+  const bg = color + '22';
+
+  if (initials) {
+    return (
+      <View style={[s.avatarCircle, { backgroundColor: bg }]}>
+        <Text style={[s.avatarCircleText, { color }]}>{initials}</Text>
+      </View>
+    );
+  }
+
+  if (lead.phone?.trim()) {
+    return (
+      <View style={[s.avatarCircle, { backgroundColor: bg }]}>
+        <Ionicons name="call-outline" size={18} color={color} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={[s.avatarCircle, { backgroundColor: bg }]}>
+      <Text style={[s.avatarCircleText, { color }]}>?</Text>
+    </View>
+  );
+}
+
+export function ContactAvatar({ contact, color = COLORS.red }: { contact: ContactNameFields; color?: string }) {
+  const initials = getContactInitials(contact);
+  const bg = color + '22';
+
+  if (initials) {
+    return (
+      <View style={[s.avatarCircle, { backgroundColor: bg }]}>
+        <Text style={[s.avatarCircleText, { color }]}>{initials}</Text>
+      </View>
+    );
+  }
+
+  if (contact.phone?.trim()) {
+    return (
+      <View style={[s.avatarCircle, { backgroundColor: bg }]}>
+        <Ionicons name="call-outline" size={18} color={color} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={[s.avatarCircle, { backgroundColor: bg }]}>
+      <Text style={[s.avatarCircleText, { color }]}>?</Text>
+    </View>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
   header: {
     backgroundColor: COLORS.white,
     paddingHorizontal: 14,
-    paddingTop: 50,
     paddingBottom: 12,
     flexDirection: 'row',
     alignItems: 'center',
@@ -204,6 +301,7 @@ const s = StyleSheet.create({
   logoP: { fontSize: 16, fontWeight: '900', color: '#fff' },
   brandName: { fontSize: 13, fontWeight: '800', color: COLORS.red, letterSpacing: 0.5 },
   brandSub: { fontSize: 8, color: COLORS.muted, letterSpacing: 1.5, fontWeight: '500' },
+  headerSubtitle: { fontSize: 10, color: COLORS.text, fontWeight: '600', marginTop: 2 },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   bellWrap: { position: 'relative' },
   bellDot: {
@@ -249,6 +347,7 @@ const s = StyleSheet.create({
     justifyContent: 'center', gap: 4,
   },
   actText: { fontSize: 11, fontWeight: '700' },
+  actBtnDisabled: { opacity: 0.45 },
   actCall: { backgroundColor: COLORS.greenLight, borderColor: COLORS.greenBorder },
   actWa: { backgroundColor: COLORS.greenLight, borderColor: COLORS.greenBorder },
   actMail: { backgroundColor: COLORS.blueLight, borderColor: COLORS.blueBorder },

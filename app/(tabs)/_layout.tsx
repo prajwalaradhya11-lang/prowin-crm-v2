@@ -1,14 +1,44 @@
-import { Tabs } from 'expo-router';
+import React, { useEffect, useState } from 'react';
+import { Redirect, Tabs } from 'expo-router';
+import { ActivityIndicator, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '../../lib/supabase';
+import { supabase, COLORS } from '../../lib/supabase';
 
 export default function TabsLayout() {
+  const [ready, setReady] = useState(false);
+  const [hasSession, setHasSession] = useState(false);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setHasSession(!!session);
+      setReady(true);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setHasSession(!!session);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  if (!ready) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.bg }}>
+        <ActivityIndicator color={COLORS.red} size="large" />
+      </View>
+    );
+  }
+
+  if (!hasSession) {
+    return <Redirect href="/(auth)/login" />;
+  }
+
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: COLORS.red,
-        tabBarInactiveTintColor: COLORS.muted,
+        tabBarInactiveTintColor: '#000000',
         tabBarStyle: {
           backgroundColor: COLORS.white,
           borderTopColor: COLORS.border,
@@ -18,8 +48,8 @@ export default function TabsLayout() {
           paddingTop: 6,
         },
         tabBarLabelStyle: {
-          fontSize: 10,
-          fontWeight: '600',
+          fontSize: 11,
+          fontWeight: '700',
         },
       }}
     >

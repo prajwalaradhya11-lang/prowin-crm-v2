@@ -1,35 +1,48 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet,
   TextInput, Linking, RefreshControl, Modal,
   ActivityIndicator,
 } from 'react-native';
 import { router } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase, COLORS } from '../../lib/supabase';
 import {
   ProwinHeader, PageTitle, StatusBadge,
-  AISummary, ActionButtons, Card, Avatar,
+  AISummary, ActionButtons, Card, LeadAvatar,
 } from '../../components/ui';
 import { LeadOptionPicker } from '../../components/LeadOptionPicker';
+import { AddNoteModal } from '../../components/AddNoteModal';
 import { generateFollowUpMessage } from '../../lib/ai';
-import { useCrmSession } from '../../hooks/useCrmSession';
+import { getName } from '../../lib/leadName';
+import { useCrmSession, getUserDisplayName } from '../../hooks/useCrmSession';
 import {
   fetchActiveStatusOptions,
   fetchActiveReasonOptions,
   updateLeadStatus,
   updateLeadStatusReason,
+  addLeadNote,
 } from '../../lib/leadStatus';
+import {
+  filterLeadsForUser, resolveUserEmployeeId, canSeeAllLeads,
+} from '../../lib/rbac';
+import {
+  getLeadAreaLabel, getLeadInterest, isLeadArchived, matchesLeadSearch,
+} from '../../lib/leadFields';
+import { setLeadNavIds } from '../../lib/leadNav';
 
 export default function LeadsScreen() {
-  const { user, canManageStatuses, loading: sessionLoading } = useCrmSession();
+  const { user, role, canManageStatuses, loading: sessionLoading } = useCrmSession();
   const [leads, setLeads] = useState<any[]>([]);
-  const [filtered, setFiltered] = useState<any[]>([]);
   const [search, setSearch] = useState('');
   const [activeFilter, setActiveFilter] = useState('All');
+  const [showArchived, setShowArchived] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [selectedLead, setSelectedLead] = useState<any>(null);
+  const [noteLead, setNoteLead] = useState<any>(null);
+  const [noteModal, setNoteModal] = useState(false);
   const [msgModal, setMsgModal] = useState(false);
   const [generatedMsg, setGeneratedMsg] = useState('');
   const [msgLoading, setMsgLoading] = useState(false);
@@ -51,38 +64,45 @@ export default function LeadsScreen() {
       .from('leads')
       .select('*')
       .order('created_at', { ascending: false });
-    if (data) { setLeads(data); applyFilters(data, activeFilter, search); }
+    if (data) {
+      const employeeId = await resolveUserEmployeeId(user);
+      const scoped = filterLeadsForUser(data, user, role, employeeId);
+      setLeads(scoped);
+    }
     if (error) console.log('Leads fetch error:', error.message);
     setLoading(false);
   }
 
   function getLeadStatus(lead: any) {
-    return lead.lead_status ?? lead.status ?? 'New';
+    return lead.lead_status ?? lead.status ?? 'Prospects';
   }
 
-  function applyFilters(data: any[], filter: string, q: string) {
-    let result = data;
-    if (filter !== 'All') {
-      result = result.filter(l => getLeadStatus(l) === filter);
+  const visibleLeads = useMemo(() => {
+    if (showArchived && canSeeAllLeads(role)) return leads;
+    return leads.filter(l => !isLeadArchived(l));
+  }, [leads, showArchived, role]);
+
+  const filtered = useMemo(() => {
+    let result = visibleLeads;
+    if (activeFilter !== 'All') {
+      result = result.filter(l => getLeadStatus(l) === activeFilter);
     }
-    if (q.trim()) {
-      const low = q.toLowerCase();
-      result = result.filter(l =>
-        (l.lead_name ?? l.name ?? '').toLowerCase().includes(low) ||
-        l.phone?.includes(q) ||
-        l.area?.toLowerCase().includes(low) ||
-        String(l.budget ?? '').toLowerCase().includes(low)
-      );
+    if (search.trim()) {
+      result = result.filter(l => matchesLeadSearch(l, search, getName));
     }
-    setFiltered(result);
-  }
+    return result;
+  }, [visibleLeads, activeFilter, search]);
 
   useEffect(() => {
     loadOptions();
     fetchLeads();
   }, []);
 
-  useEffect(() => { applyFilters(leads, activeFilter, search); }, [activeFilter, search, leads]);
+  useFocusEffect(
+    useCallback(() => {
+      loadOptions();
+    }, []),
+  );
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -111,8 +131,8 @@ export default function LeadsScreen() {
     setGeneratedMsg('');
     setMsgLoading(true);
     const msg = await generateFollowUpMessage(
-      lead.name,
-      [lead.property_type, lead.area, lead.budget].filter(Boolean).join(' in '),
+      getName(lead),
+      [lead.property_type, getLeadAreaLabel(lead), lead.budget].filter(Boolean).join(' in '),
       type
     );
     setGeneratedMsg(msg);
@@ -133,13 +153,29 @@ export default function LeadsScreen() {
   async function handleStatusChange(lead: any, newStatus: string) {
     const oldStatus = getLeadStatus(lead);
     if (oldStatus === newStatus) return;
-    const doneBy = user?.full_name ?? user?.email ?? 'Unknown';
+    const doneBy = user ? getUserDisplayName(user) : 'Unknown';
     await updateLeadStatus(lead.id, oldStatus, newStatus, doneBy);
     fetchLeads();
   }
 
-  async function handleReasonChange(leadId: string, newReason: string) {
-    await updateLeadStatusReason(leadId, newReason);
+  async function handleReasonChange(lead: any, newReason: string) {
+    const oldReason = lead.status_reason ?? null;
+    if (oldReason === newReason) return;
+    const doneBy = user ? getUserDisplayName(user) : 'Unknown';
+    await updateLeadStatusReason(lead.id, oldReason, newReason, doneBy);
+    fetchLeads();
+  }
+
+  function openLeadDetail(lead: any) {
+    setLeadNavIds(filtered.map(l => l.id));
+    router.push(`/lead/${lead.id}`);
+  }
+
+  async function handleSaveNote(note: string) {
+    if (!noteLead) return;
+    const doneBy = user ? getUserDisplayName(user) : 'Unknown';
+    await addLeadNote(noteLead.id, note, doneBy);
+    setNoteLead(null);
     fetchLeads();
   }
 
@@ -150,9 +186,11 @@ export default function LeadsScreen() {
     return COLORS.blue;
   }
 
-  const filterOptions = ['All', ...statusOptions.slice(0, 8)];
+  const filterOptions = ['All', ...statusOptions];
   const counts = filterOptions.reduce((acc, f) => {
-    acc[f] = f === 'All' ? leads.length : leads.filter(l => getLeadStatus(l) === f).length;
+    acc[f] = f === 'All'
+      ? visibleLeads.length
+      : visibleLeads.filter(l => getLeadStatus(l) === f).length;
     return acc;
   }, {} as Record<string, number>);
 
@@ -175,7 +213,7 @@ export default function LeadsScreen() {
           </View>
         }
       />
-      <PageTitle label={`CRM · ${leads.length} total leads`} title="Leads" />
+      <PageTitle label={`CRM · ${visibleLeads.length} active leads`} title="Leads" />
 
       <View style={s.searchWrap}>
         <Ionicons name="search-outline" size={16} color={COLORS.muted} style={s.searchIcon} />
@@ -209,6 +247,13 @@ export default function LeadsScreen() {
 
       <View style={s.countRow}>
         <Text style={s.countText}>Showing {filtered.length} lead{filtered.length !== 1 ? 's' : ''}</Text>
+        {canSeeAllLeads(role) && (
+          <TouchableOpacity onPress={() => setShowArchived(v => !v)}>
+            <Text style={s.archivedToggle}>
+              {showArchived ? 'Hide archived' : 'Show archived'}
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {loading
@@ -227,28 +272,31 @@ export default function LeadsScreen() {
             )}
             {filtered.map((lead) => {
               const leadStatus = getLeadStatus(lead);
+              const displayName = getName(lead);
               return (
                 <Card key={lead.id} topColor={getTopBorderColor(leadStatus)}>
-                  <View style={s.leadTop}>
-                    <Avatar
-                      initials={(lead.name ?? lead.lead_name ?? '??').split(' ').map((p: string) => p[0]).join('').slice(0, 2)}
-                      color={getTopBorderColor(leadStatus)}
-                    />
+                  <TouchableOpacity
+                    style={s.leadTopTap}
+                    activeOpacity={0.75}
+                    onPress={() => openLeadDetail(lead)}
+                  >
+                    <LeadAvatar lead={lead} color={getTopBorderColor(leadStatus)} />
                     <View style={{ flex: 1 }}>
-                      <Text style={s.leadName}>{lead.name ?? lead.lead_name}</Text>
+                      <Text style={s.leadName}>{displayName}</Text>
                       <View style={s.phoneRow}>
                         <Ionicons name="call-outline" size={11} color={COLORS.muted} />
                         <Text style={s.leadPhone}>{lead.phone}</Text>
                       </View>
+                      <Text style={s.interestTag}>Interest: {getLeadInterest(lead)}</Text>
                     </View>
-                    <View style={{ alignItems: 'flex-end', gap: 4 }}>
-                      <StatusBadge status={leadStatus} />
-                      <Text style={s.timeAgo}>
-                        {lead.last_contacted_at
-                          ? new Date(lead.last_contacted_at).toLocaleDateString()
-                          : new Date(lead.created_at).toLocaleDateString()}
-                      </Text>
-                    </View>
+                  </TouchableOpacity>
+                  <View style={s.badgeRow}>
+                    <StatusBadge status={leadStatus} />
+                    <Text style={s.timeAgo}>
+                      {lead.last_contacted_at
+                        ? new Date(lead.last_contacted_at).toLocaleDateString()
+                        : new Date(lead.created_at).toLocaleDateString()}
+                    </Text>
                   </View>
 
                   <View style={s.propGrid}>
@@ -258,15 +306,15 @@ export default function LeadsScreen() {
                     </View>
                     <View style={s.propTile}>
                       <Text style={s.propLabel}>AREA</Text>
-                      <Text style={s.propVal}>{lead.area ?? '—'}</Text>
+                      <Text style={s.propVal}>{getLeadAreaLabel(lead) || '—'}</Text>
                     </View>
                     <View style={s.propTile}>
                       <Text style={s.propLabel}>BUDGET</Text>
                       <Text style={s.propVal}>{lead.budget ?? '—'}</Text>
                     </View>
                     <View style={s.propTile}>
-                      <Text style={s.propLabel}>PURPOSE</Text>
-                      <Text style={s.propVal}>{lead.purpose ?? '—'}</Text>
+                      <Text style={s.propLabel}>ASSIGNED</Text>
+                      <Text style={s.propVal}>{lead.assigned_agent_name?.trim() || '—'}</Text>
                     </View>
                   </View>
 
@@ -284,10 +332,18 @@ export default function LeadsScreen() {
                       label="Status Reason"
                       value={lead.status_reason}
                       options={reasonOptions}
-                      onChange={v => handleReasonChange(lead.id, v)}
+                      onChange={v => handleReasonChange(lead, v)}
                       compact
                     />
                   </View>
+
+                  <TouchableOpacity
+                    style={s.noteBtn}
+                    onPress={() => { setNoteLead(lead); setNoteModal(true); }}
+                  >
+                    <Ionicons name="create-outline" size={14} color={COLORS.red} />
+                    <Text style={s.noteBtnText}>Add note</Text>
+                  </TouchableOpacity>
 
                   <View style={s.divider} />
 
@@ -295,7 +351,7 @@ export default function LeadsScreen() {
                     onCall={() => handleCall(lead.phone)}
                     onWhatsApp={() => handleWhatsApp(lead.phone, lead)}
                     onEmail={() => handleEmail(lead.email, lead)}
-                    onView={() => router.push(`/lead/${lead.id}`)}
+                    onView={() => openLeadDetail(lead)}
                   />
                 </Card>
               );
@@ -340,6 +396,13 @@ export default function LeadsScreen() {
             )}
         </View>
       </Modal>
+
+      <AddNoteModal
+        visible={noteModal}
+        onClose={() => { setNoteModal(false); setNoteLead(null); }}
+        onSave={handleSaveNote}
+        title={noteLead ? `Note — ${getName(noteLead)}` : 'Add note'}
+      />
     </View>
   );
 }
@@ -363,16 +426,33 @@ const s = StyleSheet.create({
   pillActive: { backgroundColor: COLORS.red, borderColor: COLORS.red },
   pillText: { fontSize: 12, fontWeight: '600', color: COLORS.muted },
   pillTextActive: { color: '#fff' },
-  countRow: { paddingHorizontal: 14, paddingVertical: 8 },
+  countRow: { paddingHorizontal: 14, paddingVertical: 8, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   countText: { fontSize: 11, color: COLORS.muted, fontWeight: '500' },
+  archivedToggle: { fontSize: 11, fontWeight: '700', color: COLORS.red },
   list: { flex: 1, paddingHorizontal: 14 },
   empty: { alignItems: 'center', paddingTop: 60, gap: 12 },
   emptyText: { fontSize: 15, color: COLORS.muted },
-  leadTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginBottom: 10 },
+  leadTopTap: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginBottom: 6 },
+  badgeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   leadName: { fontSize: 14, fontWeight: '800', color: COLORS.text },
   phoneRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2 },
   leadPhone: { fontSize: 11, color: COLORS.muted },
+  interestTag: { fontSize: 10, color: COLORS.amber, fontWeight: '700', marginTop: 3 },
   timeAgo: { fontSize: 10, color: COLORS.muted },
+  noteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: COLORS.redLight,
+    borderWidth: 1,
+    borderColor: COLORS.redBorder,
+    marginBottom: 8,
+  },
+  noteBtnText: { fontSize: 12, fontWeight: '700', color: COLORS.red },
   propGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 },
   propTile: { flex: 1, minWidth: '45%', backgroundColor: COLORS.bg, borderRadius: 8, padding: 8 },
   propLabel: { fontSize: 9, fontWeight: '700', color: COLORS.muted, letterSpacing: 0.4, marginBottom: 2 },

@@ -1,13 +1,27 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet,
-  Modal, TextInput, Alert, RefreshControl,
+  Modal, TextInput, Alert, RefreshControl, Platform,
 } from 'react-native';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { format, isToday, parseISO } from 'date-fns';
 import { supabase, COLORS } from '../../lib/supabase';
 import { ProwinHeader, PageTitle, Card, SectionHeader, RedButton } from '../../components/ui';
 import { scheduleTaskReminder, cancelTaskReminder } from '../../lib/notifications';
-import { format, isToday, isTomorrow, isPast, parseISO } from 'date-fns';
+import { getName } from '../../lib/leadName';
+import { useCrmSession, getUserDisplayName } from '../../hooks/useCrmSession';
+import {
+  type TaskRow,
+  taskDueDateTime,
+  formatTaskDue,
+  isTaskOverdue,
+  isTaskDone,
+  mapTaskTypeToDb,
+  mapTaskTypeFromDb,
+  normalizeDueTime,
+} from '../../lib/tasks';
 
 const FILTERS = ['All', 'Today', 'Meetings', 'Events', 'Holidays'];
 const UAE_HOLIDAYS_2026 = [
@@ -22,7 +36,8 @@ const UAE_HOLIDAYS_2026 = [
 ];
 
 export default function TasksScreen() {
-  const [tasks, setTasks] = useState<any[]>([]);
+  const { user } = useCrmSession();
+  const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [filter, setFilter] = useState('All');
   const [refreshing, setRefreshing] = useState(false);
   const [addModal, setAddModal] = useState(false);
@@ -31,60 +46,102 @@ export default function TasksScreen() {
   // new task form
   const [title, setTitle] = useState('');
   const [taskType, setTaskType] = useState('task');
-  const [dueDate, setDueDate] = useState('');
-  const [dueTime, setDueTime] = useState('10:00');
+  const [dueDateObj, setDueDateObj] = useState(() => {
+    const d = new Date();
+    d.setHours(10, 0, 0, 0);
+    return d;
+  });
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
   const [linkedLead, setLinkedLead] = useState('');
   const [saving, setSaving] = useState(false);
 
-  async function fetchTasks() {
-    const { data } = await supabase
+  const fetchTasks = useCallback(async () => {
+    const { data, error } = await supabase
       .from('tasks')
-      .select('id, title, due_date, type, status, lead_id, lead_name')
-      .order('due_date');
-    if (data) setTasks(data);
-  }
+      .select('id, title, due_date, due_time, task_type, status, related_id, related_name, assigned_to_id')
+      .order('due_date', { ascending: true });
+
+    if (error) {
+      console.warn('[tasks] fetch error', error.message);
+      return;
+    }
+    if (data) setTasks(data as TaskRow[]);
+  }, []);
 
   async function fetchLeads() {
-    const { data } = await supabase.from('leads').select('id, name').order('name');
+    const { data } = await supabase.from('leads').select('id, lead_name, first_name, last_name, phone').order('lead_name');
     if (data) setLeads(data);
   }
 
-  useEffect(() => { fetchTasks(); fetchLeads(); }, []);
+  useEffect(() => { fetchLeads(); }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchTasks();
+    }, [fetchTasks]),
+  );
+
   const onRefresh = async () => { setRefreshing(true); await fetchTasks(); setRefreshing(false); };
 
   function getFiltered() {
     let result = tasks;
-    if (filter === 'Today') result = result.filter(t => t.due_date && isToday(parseISO(t.due_date)));
-    else if (filter === 'Meetings') result = result.filter(t => t.type === 'meeting');
-    else if (filter === 'Events') result = result.filter(t => t.type === 'event');
-    else if (filter === 'Holidays') return UAE_HOLIDAYS_2026.map(h => ({ ...h, type: 'holiday', status: 'holiday', id: h.date }));
+    if (filter === 'Today') {
+      result = result.filter(t => {
+        const d = taskDueDateTime(t);
+        return d ? isToday(d) : false;
+      });
+    } else if (filter === 'Meetings') {
+      result = result.filter(t => mapTaskTypeFromDb(t.task_type) === 'meeting');
+    } else if (filter === 'Events') {
+      result = result.filter(t => mapTaskTypeFromDb(t.task_type) === 'event');
+    } else if (filter === 'Holidays') {
+      return UAE_HOLIDAYS_2026.map(h => ({ ...h, task_type: 'holiday', status: 'holiday', id: h.date }));
+    }
     return result;
   }
 
-  async function toggleDone(task: any) {
-    const newStatus = task.status === 'done' ? 'pending' : 'done';
-    await supabase.from('tasks').update({ status: newStatus }).eq('id', task.id);
-    if (newStatus === 'done') await cancelTaskReminder(task.id);
+  async function toggleDone(task: TaskRow) {
+    const newStatus = isTaskDone(task) ? 'Pending' : 'Done';
+    const { error } = await supabase.from('tasks').update({ status: newStatus }).eq('id', task.id);
+    if (error) Alert.alert('Update failed', error.message);
+    if (newStatus === 'Done') await cancelTaskReminder(task.id);
     fetchTasks();
   }
 
   async function saveTask() {
+    const dueDate = format(dueDateObj, 'yyyy-MM-dd');
+    const dueTime = format(dueDateObj, 'HH:mm');
     if (!title || !dueDate) { Alert.alert('Enter title and due date'); return; }
     setSaving(true);
-    const fullDue = `${dueDate}T${dueTime}:00`;
+
     const lead = leads.find(l => l.id === linkedLead);
+    const assigneeId = user?.id ?? null;
+    const assigneeName = user ? getUserDisplayName(user) : null;
+    const dueTimeNorm = normalizeDueTime(dueTime);
+    const dueDateTime = parseISO(`${dueDate}T${dueTimeNorm}`);
 
     const { data, error } = await supabase.from('tasks').insert({
       title,
-      type: taskType,
-      due_date: fullDue,
-      status: 'pending',
-      lead_id: linkedLead || null,
-      lead_name: lead?.name ?? null,
+      task_type: mapTaskTypeToDb(taskType),
+      due_date: dueDate,
+      due_time: dueTimeNorm,
+      status: 'Pending',
+      assigned_to_id: assigneeId,
+      assigned_to_name: assigneeName,
+      related_module: linkedLead ? 'leads' : null,
+      related_id: linkedLead || null,
+      related_name: lead ? getName(lead) : null,
     }).select().single();
 
-    if (!error && data) {
-      await scheduleTaskReminder(data.id, title, new Date(fullDue), 30);
+    if (error) {
+      Alert.alert('Could not save task', error.message);
+      setSaving(false);
+      return;
+    }
+
+    if (data) {
+      await scheduleTaskReminder(data.id, title, dueDateTime, 30);
     }
     setSaving(false);
     setAddModal(false);
@@ -92,31 +149,34 @@ export default function TasksScreen() {
     fetchTasks();
   }
 
-  function resetForm() { setTitle(''); setTaskType('task'); setDueDate(''); setDueTime('10:00'); setLinkedLead(''); }
+  function resetForm() {
+    setTitle('');
+    setTaskType('task');
+    const d = new Date();
+    d.setHours(10, 0, 0, 0);
+    setDueDateObj(d);
+    setLinkedLead('');
+  }
 
-  function getTaskIcon(type: string, status: string) {
+  function getTaskIcon(taskType: string | null, status: string | null) {
+    const type = mapTaskTypeFromDb(taskType);
     if (type === 'holiday') return { name: 'sunny-outline', color: COLORS.amber };
     if (type === 'meeting') return { name: 'location-outline', color: COLORS.amber };
     if (type === 'event') return { name: 'calendar-outline', color: COLORS.blue };
-    if (status === 'done') return { name: 'checkmark-circle', color: COLORS.green };
+    if (isTaskDone({ task_type: taskType, status, due_date: null, due_time: null, id: '', title: '', related_id: null, related_name: null, assigned_to_id: null })) {
+      return { name: 'checkmark-circle', color: COLORS.green };
+    }
     return { name: 'checkbox-outline', color: COLORS.red };
   }
 
-  function getTaskBorderColor(task: any) {
-    if (task.type === 'holiday') return COLORS.amber;
-    if (task.type === 'meeting') return COLORS.amber;
-    if (task.type === 'event') return COLORS.blue;
-    if (task.status === 'done') return COLORS.green;
-    if (task.due_date && isPast(parseISO(task.due_date)) && task.status !== 'done') return COLORS.red;
+  function getTaskBorderColor(task: TaskRow) {
+    const type = mapTaskTypeFromDb(task.task_type);
+    if (type === 'holiday') return COLORS.amber;
+    if (type === 'meeting') return COLORS.amber;
+    if (type === 'event') return COLORS.blue;
+    if (isTaskDone(task)) return COLORS.green;
+    if (isTaskOverdue(task)) return COLORS.red;
     return COLORS.blue;
-  }
-
-  function formatDue(dateStr: string) {
-    if (!dateStr) return '';
-    const d = parseISO(dateStr);
-    if (isToday(d)) return `Today · ${format(d, 'HH:mm')}`;
-    if (isTomorrow(d)) return `Tomorrow · ${format(d, 'HH:mm')}`;
-    return format(d, 'EEE d MMM · HH:mm');
   }
 
   const filtered = getFiltered();
@@ -155,34 +215,38 @@ export default function TasksScreen() {
         )}
 
         {filtered.map((task: any) => {
-          const icon = getTaskIcon(task.type, task.status);
-          const isOverdue = task.due_date && isPast(parseISO(task.due_date)) && task.status !== 'done' && task.type !== 'holiday';
+          const typeKey = task.task_type != null ? mapTaskTypeFromDb(task.task_type) : (task.type ?? 'task');
+          const icon = getTaskIcon(task.task_type ?? null, task.status ?? null);
+          const done = isTaskDone(task);
+          const overdue = isTaskOverdue(task);
 
           return (
-            <Card key={task.id} topColor={getTaskBorderColor(task)} style={task.status === 'done' ? { opacity: 0.6 } : {}}>
+            <Card key={task.id} topColor={getTaskBorderColor(task)} style={done ? { opacity: 0.6 } : {}}>
               <View style={s.taskRow}>
-                {task.type !== 'holiday' && (
+                {typeKey !== 'holiday' && (
                   <TouchableOpacity onPress={() => toggleDone(task)} style={s.checkWrap}>
-                    <View style={[s.check, task.status === 'done' && s.checkDone, isOverdue && s.checkOver]}>
-                      {task.status === 'done' && <Ionicons name="checkmark" size={12} color="#fff" />}
+                    <View style={[s.check, done && s.checkDone, overdue && s.checkOver]}>
+                      {done && <Ionicons name="checkmark" size={12} color="#fff" />}
                     </View>
                   </TouchableOpacity>
                 )}
-                {task.type === 'holiday' && (
+                {typeKey === 'holiday' && (
                   <View style={s.holidayIcon}>
                     <Ionicons name="sunny-outline" size={18} color={COLORS.amber} />
                   </View>
                 )}
                 <View style={{ flex: 1 }}>
-                  <Text style={[s.taskTitle, task.status === 'done' && s.taskDone]}>{task.title}</Text>
-                  <Text style={s.taskMeta}>{task.due_date ? formatDue(task.due_date) : task.date}</Text>
-                  {task.lead_name && (
+                  <Text style={[s.taskTitle, done && s.taskDone]}>{task.title}</Text>
+                  <Text style={s.taskMeta}>
+                    {task.due_date ? formatTaskDue(task) : task.date ? format(parseISO(task.date), 'EEE, d MMMM yyyy') : ''}
+                  </Text>
+                  {task.related_name && (
                     <Text style={s.taskLead}>
-                      <Ionicons name="person-outline" size={11} /> {task.lead_name}
+                      <Ionicons name="person-outline" size={11} /> {task.related_name}
                     </Text>
                   )}
-                  {isOverdue && <Text style={s.overdueText}>Overdue</Text>}
-                  {task.status === 'pending' && !isOverdue && task.due_date && (
+                  {overdue && <Text style={s.overdueText}>Overdue</Text>}
+                  {!done && !overdue && task.due_date && (
                     <Text style={s.reminderText}>
                       <Ionicons name="notifications-outline" size={11} /> Reminder 30 mins before
                     </Text>
@@ -229,7 +293,9 @@ export default function TasksScreen() {
           </View>
           <ScrollView style={s.modalBody}>
             <Text style={s.fieldLabel}>TITLE</Text>
-            <TextInput style={s.input} placeholder="e.g. Follow up with Sara" placeholderTextColor={COLORS.muted} value={title} onChangeText={setTitle} />
+            <TouchableOpacity style={s.input} activeOpacity={1}>
+              <TextInput style={s.textInputInner} placeholder="e.g. Follow up with Sara" placeholderTextColor={COLORS.muted} value={title} onChangeText={setTitle} />
+            </TouchableOpacity>
 
             <Text style={[s.fieldLabel, { marginTop: 14 }]}>TYPE</Text>
             <View style={s.typeRow}>
@@ -240,11 +306,42 @@ export default function TasksScreen() {
               ))}
             </View>
 
-            <Text style={[s.fieldLabel, { marginTop: 14 }]}>DUE DATE (YYYY-MM-DD)</Text>
-            <TextInput style={s.input} placeholder="2026-05-20" placeholderTextColor={COLORS.muted} value={dueDate} onChangeText={setDueDate} />
+            <Text style={[s.fieldLabel, { marginTop: 14 }]}>DUE DATE</Text>
+            <TouchableOpacity style={s.input} onPress={() => setShowDatePicker(true)}>
+              <Text style={s.pickerText}>{format(dueDateObj, 'EEE d MMM yyyy')}</Text>
+            </TouchableOpacity>
 
-            <Text style={[s.fieldLabel, { marginTop: 14 }]}>TIME (HH:MM)</Text>
-            <TextInput style={s.input} placeholder="14:00" placeholderTextColor={COLORS.muted} value={dueTime} onChangeText={setDueTime} />
+            <Text style={[s.fieldLabel, { marginTop: 14 }]}>TIME</Text>
+            <TouchableOpacity style={s.input} onPress={() => setShowTimePicker(true)}>
+              <Text style={s.pickerText}>{format(dueDateObj, 'h:mm a')}</Text>
+            </TouchableOpacity>
+
+            {showDatePicker && (
+              <DateTimePicker
+                value={dueDateObj}
+                mode="date"
+                display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                onChange={(_, d) => {
+                  setShowDatePicker(Platform.OS === 'ios');
+                  if (d) setDueDateObj(prev => {
+                    const next = new Date(d);
+                    next.setHours(prev.getHours(), prev.getMinutes(), 0, 0);
+                    return next;
+                  });
+                }}
+              />
+            )}
+            {showTimePicker && (
+              <DateTimePicker
+                value={dueDateObj}
+                mode="time"
+                display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                onChange={(_, d) => {
+                  setShowTimePicker(Platform.OS === 'ios');
+                  if (d) setDueDateObj(d);
+                }}
+              />
+            )}
 
             <Text style={[s.fieldLabel, { marginTop: 14 }]}>LINKED LEAD (optional)</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 20 }}>
@@ -253,7 +350,7 @@ export default function TasksScreen() {
               </TouchableOpacity>
               {leads.map(l => (
                 <TouchableOpacity key={l.id} style={[s.leadChip, linkedLead === l.id && s.leadChipOn]} onPress={() => setLinkedLead(l.id)}>
-                  <Text style={[s.leadChipText, linkedLead === l.id && s.leadChipTextOn]}>{l.name}</Text>
+                  <Text style={[s.leadChipText, linkedLead === l.id && s.leadChipTextOn]}>{getName(l)}</Text>
                 </TouchableOpacity>
               ))}
             </ScrollView>
@@ -302,7 +399,9 @@ const s = StyleSheet.create({
   modalTitle: { fontSize: 17, fontWeight: '800', color: COLORS.text },
   modalBody: { flex: 1, padding: 14 },
   fieldLabel: { fontSize: 10, fontWeight: '700', color: COLORS.muted, letterSpacing: 0.5, marginBottom: 8 },
-  input: { backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, padding: 12, fontSize: 14, color: COLORS.text },
+  input: { backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, padding: 12 },
+  textInputInner: { fontSize: 14, color: COLORS.text, padding: 0 },
+  pickerText: { fontSize: 14, color: COLORS.text, fontWeight: '600' },
   typeRow: { flexDirection: 'row', gap: 8 },
   typeBtn: { flex: 1, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white, alignItems: 'center' },
   typeBtnOn: { backgroundColor: COLORS.red, borderColor: COLORS.red },

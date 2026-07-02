@@ -1,4 +1,5 @@
 import { CLAUDE_API_KEY } from './supabase';
+import { getName, type LeadNameFields } from './leadName';
 
 const CLAUDE_URL = 'https://api.anthropic.com/v1/messages';
 
@@ -42,18 +43,18 @@ Be concise and professional. Do NOT use bullet points — write as flowing sente
 }
 
 // ─── Auto-generate a lead summary from lead data ────────────────────────────
-export async function generateLeadSummary(lead: {
-  name: string;
+export async function generateLeadSummary(lead: LeadNameFields & {
   property_type?: string;
   area?: string;
   budget?: string;
   source?: string;
   notes?: string;
 }): Promise<string> {
+  const displayName = getName(lead);
   const prompt = `You are a CRM assistant for Prowin Properties Dubai.
 Generate a SHORT 1-2 sentence smart summary for this new lead to help the agent quickly understand who this is:
 
-Name: ${lead.name}
+Name: ${displayName}
 Property type: ${lead.property_type ?? 'Unknown'}
 Area of interest: ${lead.area ?? 'Unknown'}
 Budget: ${lead.budget ?? 'Unknown'}

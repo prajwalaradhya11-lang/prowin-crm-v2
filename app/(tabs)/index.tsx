@@ -8,41 +8,41 @@ import { Ionicons } from '@expo/vector-icons';
 import { supabase, COLORS } from '../../lib/supabase';
 import {
   ProwinHeader, PageTitle, StatCard,
-  Card, StatusBadge, SectionHeader, Avatar,
+  Card, StatusBadge, SectionHeader, LeadAvatar,
 } from '../../components/ui';
+import { useCrmSession, getUserDisplayName } from '../../hooks/useCrmSession';
+import { formatTaskDue, mapTaskTypeFromDb } from '../../lib/tasks';
+import { getName } from '../../lib/leadName';
 import { format } from 'date-fns';
 
 export default function DashboardScreen() {
+  const { user } = useCrmSession();
   const [stats, setStats] = useState({ totalLeads: 0, openTasks: 0, callsToday: 0, conversion: '0%' });
   const [pipeline, setPipeline] = useState({ hot: 0, warm: 0, newL: 0, won: 0 });
   const [recentLeads, setRecentLeads] = useState<any[]>([]);
   const [upcomingTasks, setUpcomingTasks] = useState<any[]>([]);
-  const [agentName, setAgentName] = useState('Prajwal');
-  const [agentInitials, setAgentInitials] = useState('PA');
   const [refreshing, setRefreshing] = useState(false);
 
-  async function loadData() {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user?.user_metadata?.full_name) {
-      const parts = user.user_metadata.full_name.split(' ');
-      setAgentName(parts[0]);
-      setAgentInitials(parts.map((p: string) => p[0]).join('').slice(0, 2).toUpperCase());
-    }
+  const agentName = user ? getUserDisplayName(user).split(' ')[0] : 'Agent';
+  const agentInitials = user
+    ? getUserDisplayName(user).split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase()
+    : 'PA';
 
-    const today = new Date().toISOString().slice(0, 10);
+  async function loadData() {
+    const today = format(new Date(), 'yyyy-MM-dd');
 
     const [leadsRes, tasksRes, callsRes] = await Promise.all([
-      supabase.from('leads').select('id, name, phone, status, property_type, area, budget, ai_summary, created_at').order('created_at', { ascending: false }).limit(5),
-      supabase.from('tasks').select('id, title, due_date, type, status, lead_id').gte('due_date', today).order('due_date').limit(5),
+      supabase.from('leads').select('id, lead_name, first_name, last_name, phone, lead_status, status, property_type, area, budget, ai_summary, created_at').order('created_at', { ascending: false }).limit(5),
+      supabase.from('tasks').select('id, title, due_date, due_time, task_type, status, related_id').gte('due_date', today).order('due_date').limit(5),
       supabase.from('call_logs').select('id').gte('created_at', today + 'T00:00:00').lt('created_at', today + 'T23:59:59'),
     ]);
 
     if (leadsRes.data) {
       setRecentLeads(leadsRes.data.slice(0, 3));
-      const hot = leadsRes.data.filter((l: any) => l.status === 'Hot').length;
-      const warm = leadsRes.data.filter((l: any) => l.status === 'Warm').length;
-      const newL = leadsRes.data.filter((l: any) => l.status === 'New').length;
-      const won = leadsRes.data.filter((l: any) => l.status === 'Won').length;
+      const hot = leadsRes.data.filter((l: any) => (l.lead_status ?? l.status) === 'Hot').length;
+      const warm = leadsRes.data.filter((l: any) => (l.lead_status ?? l.status) === 'Warm').length;
+      const newL = leadsRes.data.filter((l: any) => (l.lead_status ?? l.status) === 'New').length;
+      const won = leadsRes.data.filter((l: any) => (l.lead_status ?? l.status) === 'Won').length;
       const total = leadsRes.data.length;
       setPipeline({ hot, warm, newL, won });
       setStats(prev => ({
@@ -55,7 +55,11 @@ export default function DashboardScreen() {
     if (callsRes.data) {
       setStats(prev => ({ ...prev, callsToday: callsRes.data!.length }));
     }
-    const { count } = await supabase.from('tasks').select('*', { count: 'exact', head: true }).neq('status', 'done').lte('due_date', new Date().toISOString());
+    const { count } = await supabase
+      .from('tasks')
+      .select('*', { count: 'exact', head: true })
+      .not('status', 'ilike', 'done')
+      .gte('due_date', today);
     setStats(prev => ({ ...prev, openTasks: count ?? 0 }));
   }
 
@@ -67,9 +71,8 @@ export default function DashboardScreen() {
 
   return (
     <View style={s.container}>
-      <ProwinHeader>
-        <PageTitle label="CRM overview" title={`${greeting}, ${agentName}`} />
-      </ProwinHeader>
+      <ProwinHeader agentInitials={agentInitials} />
+      <PageTitle label="CRM overview" title={`${greeting}, ${agentName}`} />
 
       <ScrollView
         style={s.scroll}
@@ -122,40 +125,46 @@ export default function DashboardScreen() {
         {upcomingTasks.length > 0 && (
           <>
             <SectionHeader title="upcoming tasks & meetings" />
-            {upcomingTasks.map((task) => (
-              <Card key={task.id} topColor={task.type === 'meeting' ? COLORS.amber : COLORS.blue} style={{ paddingVertical: 11 }}>
+            {upcomingTasks.map((task) => {
+              const typeKey = mapTaskTypeFromDb(task.task_type);
+              return (
+              <Card key={task.id} topColor={typeKey === 'meeting' ? COLORS.amber : COLORS.blue} style={{ paddingVertical: 11 }}>
                 <View style={s.taskRow}>
                   <Ionicons
-                    name={task.type === 'meeting' ? 'location-outline' : 'checkbox-outline'}
+                    name={typeKey === 'meeting' ? 'location-outline' : 'checkbox-outline'}
                     size={18}
-                    color={task.type === 'meeting' ? COLORS.amber : COLORS.blue}
+                    color={typeKey === 'meeting' ? COLORS.amber : COLORS.blue}
                   />
                   <View style={{ flex: 1 }}>
                     <Text style={s.taskTitle}>{task.title}</Text>
-                    <Text style={s.taskMeta}>{task.due_date ? format(new Date(task.due_date), 'EEE d MMM · HH:mm') : ''}</Text>
+                    <Text style={s.taskMeta}>{formatTaskDue(task)}</Text>
                   </View>
                 </View>
               </Card>
-            ))}
+              );
+            })}
           </>
         )}
 
         {/* Recent leads */}
         <SectionHeader title="recent leads" />
-        {recentLeads.map((lead) => (
+        {recentLeads.map((lead) => {
+          const leadStatus = lead.lead_status ?? lead.status ?? 'New';
+          return (
           <TouchableOpacity key={lead.id} onPress={() => router.push(`/lead/${lead.id}`)}>
-            <Card topColor={lead.status === 'Hot' ? COLORS.red : lead.status === 'Warm' ? COLORS.amber : COLORS.blue} style={{ paddingVertical: 11 }}>
+            <Card topColor={leadStatus === 'Hot' ? COLORS.red : leadStatus === 'Warm' ? COLORS.amber : COLORS.blue} style={{ paddingVertical: 11 }}>
               <View style={s.leadRow}>
-                <Avatar initials={(lead.name ?? 'XX').split(' ').map((p: string) => p[0]).join('').slice(0, 2)} color={COLORS.red} />
+                <LeadAvatar lead={lead} color={COLORS.red} />
                 <View style={{ flex: 1 }}>
-                  <Text style={s.leadName}>{lead.name}</Text>
+                  <Text style={s.leadName}>{getName(lead)}</Text>
                   <Text style={s.leadMeta}>{[lead.property_type, lead.area, lead.budget].filter(Boolean).join(' · ')}</Text>
                 </View>
-                <StatusBadge status={lead.status ?? 'New'} />
+                <StatusBadge status={leadStatus} />
               </View>
             </Card>
           </TouchableOpacity>
-        ))}
+          );
+        })}
 
         <TouchableOpacity style={s.seeAll} onPress={() => router.push('/(tabs)/leads')}>
           <Text style={s.seeAllText}>See all leads →</Text>

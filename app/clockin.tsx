@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
   ScrollView, Alert, ActivityIndicator, Modal,
@@ -6,92 +6,183 @@ import {
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
+import { format, parseISO } from 'date-fns';
 import { supabase, COLORS } from '../lib/supabase';
 import { Card } from '../components/ui';
-import { format, isToday, parseISO } from 'date-fns';
+import { getName, getLeadInitials } from '../lib/leadName';
+import { resolveEmployeeIdForUser } from '../lib/callLog';
+import { getUserDisplayName } from '../hooks/useCrmSession';
+
+type AttendanceRow = {
+  id: string;
+  employee_id: string | null;
+  employee_name: string | null;
+  date: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  status: string | null;
+  notes: string | null;
+  created_at: string | null;
+};
+
+function isMeetingRecord(rec: AttendanceRow): boolean {
+  return rec.status === 'Meeting' || (rec.notes ?? '').startsWith('Meeting:');
+}
+
+function meetingLabelFromNotes(notes: string | null): string {
+  if (!notes?.startsWith('Meeting:')) return 'Client meeting';
+  const match = notes.match(/^Meeting:\s*([^.]+)/);
+  return match?.[1]?.trim() || 'Client meeting';
+}
+
+function formatCheckInTime(rec: AttendanceRow): string {
+  if (rec.check_in) {
+    try {
+      return format(parseISO(`2000-01-01T${rec.check_in}`), 'HH:mm');
+    } catch {
+      return rec.check_in.slice(0, 5);
+    }
+  }
+  if (rec.created_at) return format(parseISO(rec.created_at), 'HH:mm');
+  return '--:--';
+}
 
 export default function ClockInScreen() {
   const [loading, setLoading] = useState(false);
   const [clockedIn, setClockedIn] = useState(false);
-  const [clockInType, setClockInType] = useState('');
+  const [clockInType, setClockInType] = useState<'office' | 'meeting'>('office');
+  const [clockInTime, setClockInTime] = useState('');
   const [leads, setLeads] = useState<any[]>([]);
   const [leadModal, setLeadModal] = useState(false);
-  const [history, setHistory] = useState<any[]>([]);
-  const [agentId, setAgentId] = useState('');
+  const [history, setHistory] = useState<AttendanceRow[]>([]);
+  const [employeeId, setEmployeeId] = useState('');
+  const [employeeName, setEmployeeName] = useState('');
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  async function loadData() {
+  const loadData = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser();
-    if (user) setAgentId(user.id);
+    if (!user) return;
 
-    const today = new Date().toISOString().slice(0, 10);
-    const { data: todayRecord } = await supabase
-      .from('attendance')
-      .select('*')
-      .eq('agent_id', user?.id)
-      .gte('created_at', today + 'T00:00:00')
-      .limit(1)
-      .single();
+    const employee = await resolveEmployeeIdForUser(user.email, getUserDisplayName({
+      id: user.id,
+      email: user.email ?? '',
+      name: user.user_metadata?.full_name ?? null,
+      role: 'agent',
+    }));
 
-    if (todayRecord) {
-      setClockedIn(true);
-      setClockInType(todayRecord.type);
+    if (!employee) {
+      console.warn('[clock-in] No employees row matched auth user', user.email);
+    } else {
+      setEmployeeId(employee.id);
+      setEmployeeName(employee.fullName);
     }
 
-    const { data: histData } = await supabase
-      .from('attendance')
-      .select('*')
-      .eq('agent_id', user?.id)
-      .order('created_at', { ascending: false })
-      .limit(7);
+    const today = format(new Date(), 'yyyy-MM-dd');
 
-    if (histData) setHistory(histData);
+    if (employee) {
+      const { data: todayRecord, error: todayErr } = await supabase
+        .from('attendance')
+        .select('*')
+        .eq('employee_id', employee.id)
+        .eq('date', today)
+        .maybeSingle();
+
+      if (todayErr) console.warn('[clock-in] today query error', todayErr.message);
+
+      if (todayRecord) {
+        setClockedIn(true);
+        setClockInType(isMeetingRecord(todayRecord) ? 'meeting' : 'office');
+        setClockInTime(formatCheckInTime(todayRecord));
+      } else {
+        setClockedIn(false);
+        setClockInTime('');
+      }
+
+      const { data: histData, error: histErr } = await supabase
+        .from('attendance')
+        .select('*')
+        .eq('employee_id', employee.id)
+        .order('date', { ascending: false })
+        .limit(7);
+
+      if (histErr) console.warn('[clock-in] history query error', histErr.message);
+      if (histData) setHistory(histData);
+    }
 
     const { data: leadsData } = await supabase
       .from('leads')
-      .select('id, name, area')
+      .select('id, lead_name, first_name, last_name, phone, area, communities')
       .order('created_at', { ascending: false });
     if (leadsData) setLeads(leadsData);
-  }
+  }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   async function clockIn(type: 'office' | 'meeting', leadId?: string, leadName?: string) {
+    if (!employeeId) {
+      Alert.alert(
+        'Cannot clock in',
+        'Your account is not linked to an employee record. Ask your manager to add you in HRMS.',
+      );
+      return;
+    }
+
     setLoading(true);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      let lat = null, lng = null, address = null;
+      let address: string | null = null;
 
       if (status === 'granted') {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-        lat = loc.coords.latitude;
-        lng = loc.coords.longitude;
-        const [geo] = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
+        const [geo] = await Location.reverseGeocodeAsync({
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude,
+        });
         address = [geo.street, geo.district, geo.city].filter(Boolean).join(', ');
       }
 
-      const { error } = await supabase.from('attendance').insert({
-        agent_id: agentId,
-        type,
-        lead_id: leadId ?? null,
-        lead_name: leadName ?? null,
-        latitude: lat,
-        longitude: lng,
-        location_address: address,
-        created_at: new Date().toISOString(),
-      });
+      const now = new Date();
+      const today = format(now, 'yyyy-MM-dd');
+      const checkIn = format(now, 'HH:mm:ss');
 
-      if (!error) {
-        setClockedIn(true);
-        setClockInType(type);
-        setLeadModal(false);
-        loadData();
+      let notes = type === 'office'
+        ? (address ? `Office clock-in. Location: ${address}` : 'Office clock-in')
+        : `Meeting: ${leadName ?? 'Client'}${address ? `. Location: ${address}` : ''}`;
+
+      const payload = {
+        employee_id: employeeId,
+        employee_name: employeeName || null,
+        date: today,
+        check_in: checkIn,
+        status: type === 'office' ? 'Present' : 'Meeting',
+        notes,
+      };
+
+      const { data, error } = await supabase
+        .from('attendance')
+        .insert(payload)
+        .select()
+        .single();
+
+      console.log('[clock-in] insert response', { data, error: error?.message });
+
+      if (error) {
+        Alert.alert('Clock-in failed', error.message);
+        return;
       }
+
+      setClockedIn(true);
+      setClockInType(type);
+      setClockInTime(format(now, 'HH:mm'));
+      setLeadModal(false);
+      await loadData();
     } catch (e) {
-      Alert.alert('Error', 'Could not clock in. Try again.');
+      const msg = e instanceof Error ? e.message : 'Could not clock in. Try again.';
+      Alert.alert('Error', msg);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   function handleOffice() { clockIn('office'); }
@@ -99,7 +190,6 @@ export default function ClockInScreen() {
 
   return (
     <View style={s.container}>
-      {/* Header */}
       <View style={s.header}>
         <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
           <Ionicons name="chevron-down" size={24} color={COLORS.text} />
@@ -109,7 +199,6 @@ export default function ClockInScreen() {
       </View>
 
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}>
-        {/* Time card */}
         <View style={s.timeCard}>
           <Text style={s.timeText}>{format(new Date(), 'HH:mm')}</Text>
           <Text style={s.dateText}>{format(new Date(), 'EEEE, d MMMM yyyy')}</Text>
@@ -145,45 +234,52 @@ export default function ClockInScreen() {
                 <Text style={s.clockedText}>
                   {clockInType === 'office' ? 'In the office' : 'At a meeting'}
                 </Text>
-                <Text style={s.clockedSub}>Clocked in today at {format(new Date(), 'HH:mm')}</Text>
+                <Text style={s.clockedSub}>
+                  Clocked in today at {clockInTime || format(new Date(), 'HH:mm')}
+                </Text>
               </View>
             </View>
           )}
         </View>
 
-        {/* History */}
         {history.length > 0 && (
           <>
-            <Text style={s.histTitle}>THIS WEEK</Text>
-            {history.map((rec) => (
-              <Card key={rec.id} topColor={rec.type === 'office' ? COLORS.green : COLORS.amber} style={{ paddingVertical: 11 }}>
-                <View style={s.histRow}>
-                  <Ionicons
-                    name={rec.type === 'office' ? 'business-outline' : 'location-outline'}
-                    size={18}
-                    color={rec.type === 'office' ? COLORS.green : COLORS.amber}
-                  />
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.histTitle2}>
-                      {rec.type === 'office' ? 'In the office' : `Meeting — ${rec.lead_name ?? 'Client'}`}
-                    </Text>
-                    <Text style={s.histMeta}>
-                      {format(parseISO(rec.created_at), 'EEE d MMM · HH:mm')}
-                      {rec.location_address ? ` · ${rec.location_address}` : ''}
-                    </Text>
+            <Text style={s.histTitle}>RECENT</Text>
+            {history.map((rec) => {
+              const meeting = isMeetingRecord(rec);
+              return (
+                <Card key={rec.id} topColor={meeting ? COLORS.amber : COLORS.green} style={{ paddingVertical: 11 }}>
+                  <View style={s.histRow}>
+                    <Ionicons
+                      name={meeting ? 'location-outline' : 'business-outline'}
+                      size={18}
+                      color={meeting ? COLORS.amber : COLORS.green}
+                    />
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.histTitle2}>
+                        {meeting ? `Meeting — ${meetingLabelFromNotes(rec.notes)}` : 'In the office'}
+                      </Text>
+                      <Text style={s.histMeta}>
+                        {rec.date ? format(parseISO(rec.date), 'EEE d MMM') : ''}
+                        {' · '}
+                        {formatCheckInTime(rec)}
+                        {rec.notes && !meeting && rec.notes.includes('Location:')
+                          ? ` · ${rec.notes.split('Location:')[1]?.trim()}`
+                          : ''}
+                      </Text>
+                    </View>
+                    <View style={[s.checkBadge, { backgroundColor: COLORS.greenLight }]}>
+                      <Ionicons name="checkmark" size={14} color={COLORS.green} />
+                    </View>
                   </View>
-                  <View style={[s.checkBadge, { backgroundColor: COLORS.greenLight }]}>
-                    <Ionicons name="checkmark" size={14} color={COLORS.green} />
-                  </View>
-                </View>
-              </Card>
-            ))}
+                </Card>
+              );
+            })}
           </>
         )}
         <View style={{ height: 32 }} />
       </ScrollView>
 
-      {/* Lead picker modal */}
       <Modal visible={leadModal} animationType="slide" presentationStyle="pageSheet">
         <View style={s.modal}>
           <View style={s.modalHeader}>
@@ -193,24 +289,33 @@ export default function ClockInScreen() {
             </TouchableOpacity>
           </View>
           <ScrollView style={{ flex: 1, padding: 14 }}>
-            <Text style={s.modalSub}>Your GPS location will be saved and linked to this lead's timeline.</Text>
-            {leads.map(lead => (
-              <TouchableOpacity
-                key={lead.id}
-                style={s.leadRow}
-                onPress={() => clockIn('meeting', lead.id, lead.name)}
-                disabled={loading}
-              >
-                <View style={s.leadAvatar}>
-                  <Text style={s.leadAvatarText}>{lead.name.split(' ').map((p: string) => p[0]).join('').slice(0, 2)}</Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.leadRowName}>{lead.name}</Text>
-                  {lead.area && <Text style={s.leadRowMeta}>{lead.area}</Text>}
-                </View>
-                <Ionicons name="chevron-forward" size={16} color={COLORS.muted} />
-              </TouchableOpacity>
-            ))}
+            <Text style={s.modalSub}>Your GPS location will be saved in the attendance notes.</Text>
+            {leads.map(lead => {
+              const displayName = getName(lead);
+              const initials = getLeadInitials(lead);
+              const areaLabel = lead.area ?? lead.communities;
+              return (
+                <TouchableOpacity
+                  key={lead.id}
+                  style={s.leadRow}
+                  onPress={() => clockIn('meeting', lead.id, displayName)}
+                  disabled={loading}
+                >
+                  <View style={s.leadAvatar}>
+                    {initials
+                      ? <Text style={s.leadAvatarText}>{initials}</Text>
+                      : lead.phone?.trim()
+                        ? <Ionicons name="call-outline" size={16} color={COLORS.red} />
+                        : <Text style={s.leadAvatarText}>?</Text>}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.leadRowName}>{displayName}</Text>
+                    {areaLabel && <Text style={s.leadRowMeta}>{areaLabel}</Text>}
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={COLORS.muted} />
+                </TouchableOpacity>
+              );
+            })}
           </ScrollView>
         </View>
       </Modal>
