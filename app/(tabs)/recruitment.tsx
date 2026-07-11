@@ -4,6 +4,7 @@ import {
   Text,
   StyleSheet,
   FlatList,
+  Pressable,
   TouchableOpacity,
   Modal,
   TextInput,
@@ -16,6 +17,7 @@ import {
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { router } from 'expo-router';
 import { supabase, COLORS } from '../../lib/supabase';
 import { ProwinHeader, PageTitle } from '../../components/ui';
 import { useCrmSession, getUserDisplayName, type CrmUser } from '../../hooks/useCrmSession';
@@ -121,13 +123,22 @@ function getCallStatusPillStyle(status: string | null) {
   return { label, bg: '#f3f3f3', border: THEME.border, text: THEME.meta };
 }
 
-function CandidateCard({ candidate }: { candidate: RecruitmentCandidate }) {
+function CandidateCard({
+  candidate,
+  onPress,
+}: {
+  candidate: RecruitmentCandidate;
+  onPress: () => void;
+}) {
   const subtitleParts = [candidate.position_applied, candidate.source].filter(Boolean);
   const subtitle = subtitleParts.join(' · ');
   const callStatus = getCallStatusPillStyle(candidate.call_status);
 
   return (
-    <View style={s.card}>
+    <Pressable
+      style={({ pressed }) => [s.card, pressed && s.cardPressed]}
+      onPress={onPress}
+    >
       <View style={s.cardTop}>
         <View style={s.cardMain}>
           <Text style={s.cardName} numberOfLines={1}>
@@ -150,7 +161,7 @@ function CandidateCard({ candidate }: { candidate: RecruitmentCandidate }) {
           </Text>
         </View>
       </View>
-    </View>
+    </Pressable>
   );
 }
 
@@ -286,7 +297,12 @@ export default function RecruitmentScreen() {
               <Text style={s.emptyText}>No candidates yet</Text>
             </View>
           }
-          renderItem={({ item }) => <CandidateCard candidate={item} />}
+          renderItem={({ item }) => (
+            <CandidateCard
+              candidate={item}
+              onPress={() => router.push(`/recruitment/${item.id}`)}
+            />
+          )}
         />
       )}
 
@@ -421,6 +437,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 12,
   },
+  cardPressed: { opacity: 0.92 },
   cardTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
   cardMain: { flex: 1, minWidth: 0 },
   cardName: { fontSize: 14, fontWeight: '800', color: THEME.heading },
