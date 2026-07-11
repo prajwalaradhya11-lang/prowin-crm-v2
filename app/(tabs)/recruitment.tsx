@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -20,11 +20,22 @@ import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { supabase, COLORS } from '../../lib/supabase';
 import { ProwinHeader, PageTitle } from '../../components/ui';
+import { LeadStatusTabsPager } from '../../components/leads/LeadStatusTabsPager';
 import { useCrmSession, getUserDisplayName, type CrmUser } from '../../hooks/useCrmSession';
 import { THEME } from '../../lib/prowinTheme';
 
 const RECRUITMENT_SELECT_COLUMNS =
   'id,candidate_name,source,position_applied,phone,email,interview_status,offer_status,joining_status,notes,cv_url,assigned_recruiter_id,assigned_recruiter_name,call_status,follow_up_date,created_at';
+
+const STATUS_FILTER_OPTIONS = [
+  'All',
+  'New',
+  'Contacted',
+  'Interview',
+  'Shortlisted',
+  'Hired',
+  'Rejected',
+] as const;
 
 type RecruitmentCandidate = {
   id: string;
@@ -66,6 +77,18 @@ const EMPTY_FORM: AddCandidateForm = {
 function trimOrNull(value: string): string | null {
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+function normalizeCallStatus(status: string | null | undefined): string {
+  return status?.trim() || 'New';
+}
+
+function candidateMatchesStatusFilter(
+  candidate: RecruitmentCandidate,
+  filter: (typeof STATUS_FILTER_OPTIONS)[number],
+): boolean {
+  if (filter === 'All') return true;
+  return normalizeCallStatus(candidate.call_status).toLowerCase() === filter.toLowerCase();
 }
 
 function isRecruiterRole(role: string | null): boolean {
@@ -174,6 +197,29 @@ export default function RecruitmentScreen() {
   const [form, setForm] = useState<AddCandidateForm>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [activeTabIndex, setActiveTabIndex] = useState(0);
+
+  const candidatesByTab = useMemo(
+    () =>
+      STATUS_FILTER_OPTIONS.map((filter) =>
+        candidates.filter((candidate) => candidateMatchesStatusFilter(candidate, filter)),
+      ),
+    [candidates],
+  );
+
+  const tabs = useMemo(
+    () =>
+      STATUS_FILTER_OPTIONS.map((label, index) => ({
+        key: label,
+        label,
+        count: candidatesByTab[index]?.length ?? 0,
+      })),
+    [candidatesByTab],
+  );
+
+  const handleTabIndexChange = useCallback((index: number) => {
+    setActiveTabIndex(index);
+  }, []);
 
   const fetchCandidates = useCallback(async () => {
     if (!canViewAllCandidates(role) && !isRecruiterRole(role)) {
@@ -258,6 +304,45 @@ export default function RecruitmentScreen() {
     Alert.alert('Success', 'Candidate added.');
   }, [form, role, user, closeModal, fetchCandidates]);
 
+  const renderCandidatePage = useCallback(
+    (tabIndex: number) => {
+      const pageCandidates = candidatesByTab[tabIndex] ?? [];
+      const tabLabel = STATUS_FILTER_OPTIONS[tabIndex] ?? 'All';
+      const emptyMessage =
+        tabLabel === 'All' ? 'No candidates yet' : `No candidates in ${tabLabel}`;
+
+      return (
+        <FlatList
+          data={pageCandidates}
+          keyExtractor={(item) => item.id}
+          style={s.list}
+          contentContainerStyle={
+            pageCandidates.length === 0 ? s.listEmptyContent : s.listContent
+          }
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            tabIndex === activeTabIndex ? (
+              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.red} />
+            ) : undefined
+          }
+          ListEmptyComponent={
+            <View style={s.empty}>
+              <Ionicons name="person-add-outline" size={48} color={COLORS.muted} />
+              <Text style={s.emptyText}>{emptyMessage}</Text>
+            </View>
+          }
+          renderItem={({ item }) => (
+            <CandidateCard
+              candidate={item}
+              onPress={() => router.push(`/recruitment/${item.id}`)}
+            />
+          )}
+        />
+      );
+    },
+    [activeTabIndex, candidatesByTab, refreshing, onRefresh],
+  );
+
   const modalMaxHeight = Dimensions.get('window').height * 0.9;
   const showLoading = sessionLoading || loading;
 
@@ -282,27 +367,11 @@ export default function RecruitmentScreen() {
       {showLoading ? (
         <ActivityIndicator color={COLORS.red} style={s.loader} />
       ) : (
-        <FlatList
-          data={candidates}
-          keyExtractor={(item) => item.id}
-          style={s.list}
-          contentContainerStyle={candidates.length === 0 ? s.listEmptyContent : s.listContent}
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.red} />
-          }
-          ListEmptyComponent={
-            <View style={s.empty}>
-              <Ionicons name="person-add-outline" size={48} color={COLORS.muted} />
-              <Text style={s.emptyText}>No candidates yet</Text>
-            </View>
-          }
-          renderItem={({ item }) => (
-            <CandidateCard
-              candidate={item}
-              onPress={() => router.push(`/recruitment/${item.id}`)}
-            />
-          )}
+        <LeadStatusTabsPager
+          tabs={tabs}
+          activeIndex={activeTabIndex}
+          onIndexChange={handleTabIndexChange}
+          renderPage={(_, index) => renderCandidatePage(index)}
         />
       )}
 
