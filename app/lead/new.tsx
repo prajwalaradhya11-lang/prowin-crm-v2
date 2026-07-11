@@ -6,6 +6,7 @@ import {
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase, COLORS } from '../../lib/supabase';
+import { SafeScreenHeader } from '../../components/SafeScreenHeader';
 import { generateLeadSummary } from '../../lib/ai';
 import { fetchActiveStatusOptions, fetchActiveReasonOptions } from '../../lib/leadStatus';
 
@@ -168,13 +169,7 @@ export default function AddLeadScreen() {
 
   return (
     <View style={s.container}>
-      <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
-          <Ionicons name="chevron-back" size={24} color={COLORS.text} />
-        </TouchableOpacity>
-        <Text style={s.headerTitle}>Add New Lead</Text>
-        <View style={{ width: 40 }} />
-      </View>
+      <SafeScreenHeader title="Add New Lead" onBack={() => router.back()} />
 
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}>
 
@@ -311,9 +306,6 @@ export default function AddLeadScreen() {
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, paddingTop: 52, backgroundColor: COLORS.white, borderBottomWidth: 1, borderBottomColor: COLORS.border },
-  backBtn: { width: 40 },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: COLORS.text },
   scroll: { flex: 1, padding: 14 },
   section: { fontSize: 10, fontWeight: '700', color: COLORS.muted, letterSpacing: 0.8, marginTop: 20, marginBottom: 10 },
   row: { flexDirection: 'row' },

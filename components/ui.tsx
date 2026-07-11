@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
+  View, Text, TouchableOpacity, Pressable, StyleSheet, ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -8,7 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { COLORS, STATUS_COLORS } from '../lib/supabase';
 import { getLeadInitials, type LeadNameFields } from '../lib/leadName';
 import { getContactInitials, type ContactNameFields } from '../lib/contactName';
-import { signOut } from '../lib/auth';
+import { CrmAvatar } from './CrmAvatar';
 
 // ─── PROWIN HEADER ──────────────────────────────────────────────────────────
 export function ProwinHeader({
@@ -16,19 +16,34 @@ export function ProwinHeader({
   rightContent,
   onBell,
   onAvatarPress,
+  onLogoPress,
   unreadCount = 0,
   agentInitials = 'PA',
+  agentName,
+  agentPhotoUrl,
 }: {
   subtitle?: string;
   /** Extra controls shown before the bell (e.g. add button). Bell + avatar always visible. */
   rightContent?: React.ReactNode;
   onBell?: () => void;
   onAvatarPress?: () => void;
+  onLogoPress?: () => void;
   unreadCount?: number;
   agentInitials?: string;
+  agentName?: string;
+  agentPhotoUrl?: string | null;
 }) {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const displayName = agentName?.trim() || agentInitials;
+
+  function handleLogoPress() {
+    if (onLogoPress) {
+      onLogoPress();
+    } else {
+      router.push('/(tabs)/');
+    }
+  }
 
   function handleBell() {
     if (onBell) {
@@ -43,26 +58,12 @@ export function ProwinHeader({
       onAvatarPress();
       return;
     }
-    Alert.alert('Account', undefined, [
-      {
-        text: 'Log out',
-        style: 'destructive',
-        onPress: async () => {
-          const { error } = await signOut();
-          if (error) {
-            Alert.alert('Logout failed', error.message);
-            return;
-          }
-          router.replace('/(auth)/login');
-        },
-      },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
+    router.push('/profile');
   }
 
   return (
-    <View style={[s.header, { paddingTop: insets.top + 8 }]}>
-      <View style={s.logoWrap}>
+    <View style={[s.header, { paddingTop: insets.top + 12 }]}>
+      <Pressable style={s.logoWrap} onPress={handleLogoPress} accessibilityLabel="Go to home">
         <View style={s.logoBox}>
           <Text style={s.logoP}>P</Text>
         </View>
@@ -71,15 +72,20 @@ export function ProwinHeader({
           <Text style={s.brandSub}>PROPERTIES</Text>
           {subtitle ? <Text style={s.headerSubtitle}>{subtitle}</Text> : null}
         </View>
-      </View>
+      </Pressable>
       <View style={s.headerRight}>
         {rightContent}
         <TouchableOpacity style={s.bellWrap} onPress={handleBell} accessibilityLabel="Notifications">
           <Ionicons name="notifications-outline" size={22} color={COLORS.muted} />
           {unreadCount > 0 && <View style={s.bellDot} />}
         </TouchableOpacity>
-        <TouchableOpacity style={s.avatar} onPress={handleAvatarPress} accessibilityLabel="Account menu">
-          <Text style={s.avatarText}>{agentInitials}</Text>
+        <TouchableOpacity style={s.avatar} onPress={handleAvatarPress} accessibilityLabel="Agent profile">
+          <CrmAvatar
+            name={displayName}
+            photoUrl={agentPhotoUrl}
+            size={32}
+            color={COLORS.red}
+          />
         </TouchableOpacity>
       </View>
     </View>
@@ -314,6 +320,7 @@ const s = StyleSheet.create({
     width: 32, height: 32, borderRadius: 16,
     backgroundColor: COLORS.red,
     alignItems: 'center', justifyContent: 'center',
+    overflow: 'hidden',
   },
   avatarText: { fontSize: 11, fontWeight: '700', color: '#fff' },
   pageTitle: {

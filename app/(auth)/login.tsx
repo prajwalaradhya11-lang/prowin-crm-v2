@@ -2,14 +2,16 @@ import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, Alert, KeyboardAvoidingView,
-  Platform, ActivityIndicator, Image,
+  Platform, ActivityIndicator, ScrollView,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { supabase, COLORS } from '../../lib/supabase';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
   async function handleLogin() {
@@ -30,63 +32,86 @@ export default function LoginScreen() {
   return (
     <KeyboardAvoidingView
       style={s.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <View style={s.topSection}>
-        <View style={s.logoBox}>
-          <Text style={s.logoP}>P</Text>
+      <ScrollView
+        contentContainerStyle={s.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={s.topSection}>
+          <View style={s.logoBox}>
+            <Text style={s.logoP}>P</Text>
+          </View>
+          <Text style={s.brandName}>PROWIN</Text>
+          <Text style={s.brandSub}>PROPERTIES</Text>
+          <Text style={s.welcomeText}>Agent CRM</Text>
+          <Text style={s.subText}>Sign in to your account</Text>
         </View>
-        <Text style={s.brandName}>PROWIN</Text>
-        <Text style={s.brandSub}>PROPERTIES</Text>
-        <Text style={s.welcomeText}>Agent CRM</Text>
-        <Text style={s.subText}>Sign in to your account</Text>
-      </View>
 
-      <View style={s.formCard}>
-        <Text style={s.fieldLabel}>EMAIL ADDRESS</Text>
-        <TextInput
-          style={s.input}
-          placeholder="you@prowinproperties.com"
-          placeholderTextColor={COLORS.muted}
-          value={email}
-          onChangeText={setEmail}
-          keyboardType="email-address"
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
+        <View style={s.formCard}>
+          <Text style={s.fieldLabel}>EMAIL ADDRESS</Text>
+          <TextInput
+            style={s.input}
+            placeholder="you@prowinproperties.com"
+            placeholderTextColor={COLORS.muted}
+            value={email}
+            onChangeText={setEmail}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
 
-        <Text style={[s.fieldLabel, { marginTop: 14 }]}>PASSWORD</Text>
-        <TextInput
-          style={s.input}
-          placeholder="Enter your password"
-          placeholderTextColor={COLORS.muted}
-          value={password}
-          onChangeText={setPassword}
-          secureTextEntry
-        />
+          <Text style={[s.fieldLabel, { marginTop: 14 }]}>PASSWORD</Text>
+          <View style={s.passwordRow}>
+            <TextInput
+              style={s.passwordInput}
+              placeholder="Enter your password"
+              placeholderTextColor={COLORS.muted}
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry={!showPassword}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TouchableOpacity
+              style={s.eyeBtn}
+              onPress={() => setShowPassword(v => !v)}
+              accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+              hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+            >
+              <Ionicons
+                name={showPassword ? 'eye-off-outline' : 'eye-outline'}
+                size={20}
+                color={COLORS.muted}
+              />
+            </TouchableOpacity>
+          </View>
 
-        <TouchableOpacity
-          style={[s.loginBtn, loading && { opacity: 0.7 }]}
-          onPress={handleLogin}
-          disabled={loading}
-        >
-          {loading
-            ? <ActivityIndicator color="#fff" />
-            : <Text style={s.loginBtnText}>Sign In</Text>}
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={[s.loginBtn, loading && { opacity: 0.7 }]}
+            onPress={handleLogin}
+            disabled={loading}
+          >
+            {loading
+              ? <ActivityIndicator color="#fff" />
+              : <Text style={s.loginBtnText}>Sign In</Text>}
+          </TouchableOpacity>
 
-        <Text style={s.helpText}>
-          Having trouble? Contact your manager.
-        </Text>
-      </View>
+          <Text style={s.helpText}>
+            Having trouble? Contact your manager.
+          </Text>
+        </View>
 
-      <Text style={s.footer}>© 2026 Prowin Properties LLC · Dubai</Text>
+        <Text style={s.footer}>© 2026 Prowin Properties LLC · Dubai</Text>
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  container: { flex: 1, backgroundColor: COLORS.bg },
+  scrollContent: { flexGrow: 1, justifyContent: 'center', padding: 24 },
   topSection: { alignItems: 'center', marginBottom: 32 },
   logoBox: { width: 64, height: 64, borderRadius: 16, backgroundColor: COLORS.red, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
   logoP: { fontSize: 32, fontWeight: '900', color: '#fff' },
@@ -97,8 +122,18 @@ const s = StyleSheet.create({
   formCard: { width: '100%', backgroundColor: COLORS.white, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: COLORS.border },
   fieldLabel: { fontSize: 10, fontWeight: '700', color: COLORS.muted, letterSpacing: 0.5, marginBottom: 6 },
   input: { backgroundColor: COLORS.bg, borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, padding: 13, fontSize: 14, color: COLORS.text },
+  passwordRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.bg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+  },
+  passwordInput: { flex: 1, padding: 13, fontSize: 14, color: COLORS.text },
+  eyeBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   loginBtn: { backgroundColor: COLORS.red, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 20 },
   loginBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   helpText: { fontSize: 12, color: COLORS.muted, textAlign: 'center', marginTop: 14 },
-  footer: { fontSize: 11, color: COLORS.muted, marginTop: 28 },
+  footer: { fontSize: 11, color: COLORS.muted, marginTop: 28, textAlign: 'center' },
 });

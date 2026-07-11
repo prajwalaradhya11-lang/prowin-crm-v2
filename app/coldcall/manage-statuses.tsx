@@ -6,6 +6,7 @@ import {
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '../../lib/supabase';
+import { SafeScreenHeader } from '../../components/SafeScreenHeader';
 import { useCrmSession } from '../../hooks/useCrmSession';
 import {
   CallStatusOption,
@@ -83,13 +84,7 @@ export default function ManageCallStatusesScreen() {
 
   return (
     <View style={s.container}>
-      <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
-          <Ionicons name="chevron-back" size={24} color={COLORS.text} />
-        </TouchableOpacity>
-        <Text style={s.headerTitle}>Call Statuses</Text>
-        <View style={{ width: 40 }} />
-      </View>
+      <SafeScreenHeader title="Call Statuses" onBack={() => router.back()} />
 
       <ScrollView style={s.scroll} contentContainerStyle={s.scrollContent}>
         <View style={s.panel}>
@@ -135,18 +130,6 @@ export default function ManageCallStatusesScreen() {
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.bg },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-    paddingTop: 52,
-    backgroundColor: COLORS.white,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-  },
-  backBtn: { width: 40 },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: COLORS.text },
   scroll: { flex: 1 },
   scrollContent: { padding: 14 },
   panel: {

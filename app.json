@@ -1,7 +1,8 @@
-{
+﻿{
   "expo": {
     "name": "prowin-crm-v2",
     "slug": "prowin-crm-v2",
+    "scheme": "prowincrm",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -39,3 +40,4 @@
     ]
   }
 }
+

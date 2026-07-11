@@ -25,7 +25,7 @@ export function SafeScreenHeader({
   const insets = useSafeAreaInsets();
 
   return (
-    <View style={[s.wrap, { paddingTop: insets.top + 8 }, style]}>
+    <View style={[s.wrap, { paddingTop: insets.top + 12 }, style]}>
       <View style={s.row}>
         {leftContent ?? (
           onBack ? (

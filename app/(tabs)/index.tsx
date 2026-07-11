@@ -1,174 +1,330 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity,
-  StyleSheet, RefreshControl,
+  View, Text, ScrollView, TouchableOpacity, Pressable,
+  StyleSheet, RefreshControl, ActivityIndicator,
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { supabase, COLORS } from '../../lib/supabase';
-import {
-  ProwinHeader, PageTitle, StatCard,
-  Card, StatusBadge, SectionHeader, LeadAvatar,
-} from '../../components/ui';
-import { useCrmSession, getUserDisplayName } from '../../hooks/useCrmSession';
-import { formatTaskDue, mapTaskTypeFromDb } from '../../lib/tasks';
-import { getName } from '../../lib/leadName';
 import { format } from 'date-fns';
+import { ProwinHeader, PageTitle } from '../../components/ui';
+import { CrmAvatar } from '../../components/CrmAvatar';
+import { useCrmSession, getUserDisplayName } from '../../hooks/useCrmSession';
+import {
+  fetchHomeDashboardData,
+  formatTalkTimeHms,
+  getFirstName,
+  type ChampionEntry,
+  type HomeDashboardData,
+} from '../../lib/homeStats';
+import { getInitialsFromName } from '../../components/CrmAvatar';
 
-export default function DashboardScreen() {
-  const { user } = useCrmSession();
-  const [stats, setStats] = useState({ totalLeads: 0, openTasks: 0, callsToday: 0, conversion: '0%' });
-  const [pipeline, setPipeline] = useState({ hot: 0, warm: 0, newL: 0, won: 0 });
-  const [recentLeads, setRecentLeads] = useState<any[]>([]);
-  const [upcomingTasks, setUpcomingTasks] = useState<any[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
+const HOME = {
+  page: '#F4F4F2',
+  card: '#FFFFFF',
+  border: '#ececec',
+  red: '#C0392B',
+  blue: '#2563EB',
+  amber: '#E28A2B',
+  green: '#1FA971',
+  label: '#999999',
+  text: '#1a1a1a',
+};
 
-  const agentName = user ? getUserDisplayName(user).split(' ')[0] : 'Agent';
-  const agentInitials = user
-    ? getUserDisplayName(user).split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase()
-    : 'PA';
+const EMPTY_DATA: HomeDashboardData = {
+  profile: null,
+  agentStats: {
+    connected: 0,
+    talkTimeSeconds: 0,
+    prospects: 0,
+    totalLeads: 0,
+    meetings: 0,
+    closings: 0,
+  },
+  pipeline: { newL: 0, hot: 0, warm: 0, won: 0 },
+  champions: { revenue: null, talkTime: null, meetings: null },
+};
 
-  async function loadData() {
-    const today = format(new Date(), 'yyyy-MM-dd');
+function roundStat(value: number): string {
+  return String(Math.round(value));
+}
 
-    const [leadsRes, tasksRes, callsRes] = await Promise.all([
-      supabase.from('leads').select('id, lead_name, first_name, last_name, phone, lead_status, status, property_type, area, budget, ai_summary, created_at').order('created_at', { ascending: false }).limit(5),
-      supabase.from('tasks').select('id, title, due_date, due_time, task_type, status, related_id').gte('due_date', today).order('due_date').limit(5),
-      supabase.from('call_logs').select('id').gte('created_at', today + 'T00:00:00').lt('created_at', today + 'T23:59:59'),
-    ]);
+function MetricColumn({
+  label,
+  value,
+  valueColor,
+  wide,
+  onPress,
+}: {
+  label: string;
+  value: string;
+  valueColor?: string;
+  wide?: boolean;
+  onPress?: () => void;
+}) {
+  const content = (
+    <>
+      <Text style={s.metricLabel}>{label}</Text>
+      <Text
+        style={[s.metricValue, wide && s.metricValueWide, valueColor ? { color: valueColor } : null]}
+        numberOfLines={1}
+      >
+        {value}
+      </Text>
+    </>
+  );
 
-    if (leadsRes.data) {
-      setRecentLeads(leadsRes.data.slice(0, 3));
-      const hot = leadsRes.data.filter((l: any) => (l.lead_status ?? l.status) === 'Hot').length;
-      const warm = leadsRes.data.filter((l: any) => (l.lead_status ?? l.status) === 'Warm').length;
-      const newL = leadsRes.data.filter((l: any) => (l.lead_status ?? l.status) === 'New').length;
-      const won = leadsRes.data.filter((l: any) => (l.lead_status ?? l.status) === 'Won').length;
-      const total = leadsRes.data.length;
-      setPipeline({ hot, warm, newL, won });
-      setStats(prev => ({
-        ...prev,
-        totalLeads: total,
-        conversion: total > 0 ? ((won / total) * 100).toFixed(1) + '%' : '0%',
-      }));
-    }
-    if (tasksRes.data) setUpcomingTasks(tasksRes.data);
-    if (callsRes.data) {
-      setStats(prev => ({ ...prev, callsToday: callsRes.data!.length }));
-    }
-    const { count } = await supabase
-      .from('tasks')
-      .select('*', { count: 'exact', head: true })
-      .not('status', 'ilike', 'done')
-      .gte('due_date', today);
-    setStats(prev => ({ ...prev, openTasks: count ?? 0 }));
+  if (onPress) {
+    return (
+      <Pressable style={[s.metricCol, wide && s.metricColWide]} onPress={onPress}>
+        {content}
+      </Pressable>
+    );
   }
 
-  useEffect(() => { loadData(); }, []);
-  const onRefresh = async () => { setRefreshing(true); await loadData(); setRefreshing(false); };
+  return <View style={[s.metricCol, wide && s.metricColWide]}>{content}</View>;
+}
+
+function HomeCard({
+  title,
+  accentColor,
+  children,
+}: {
+  title: string;
+  accentColor: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <View style={[s.card, { borderTopColor: accentColor }]}>
+      <Text style={s.cardTitle}>{title}</Text>
+      {children}
+    </View>
+  );
+}
+
+function ChampionHero({ entry }: { entry: ChampionEntry }) {
+  if (!entry) {
+    return (
+      <View style={[s.heroCard, { borderTopColor: HOME.amber }]}>
+        <Text style={s.heroLabel}>HIGHEST REVENUE</Text>
+        <Text style={s.emptyDash}>—</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={[s.heroCard, { borderTopColor: HOME.amber }]}>
+      <View style={s.rankPillWrap}>
+        <View style={s.rankPill}>
+          <Ionicons name="trophy" size={12} color={HOME.amber} />
+          <Text style={s.rankText}>#1</Text>
+        </View>
+      </View>
+      <Text style={s.heroLabel}>HIGHEST REVENUE</Text>
+      <CrmAvatar name={entry.name} photoUrl={entry.photo_url} size={70} />
+      <Text style={s.heroName}>{entry.name}</Text>
+      <Text style={s.heroRole}>{entry.role}</Text>
+      <Text style={s.heroValue}>{entry.displayValue}</Text>
+    </View>
+  );
+}
+
+function ChampionMini({
+  title,
+  accentColor,
+  entry,
+}: {
+  title: string;
+  accentColor: string;
+  entry: ChampionEntry;
+}) {
+  return (
+    <View style={[s.miniCard, { borderTopColor: accentColor }]}>
+      <View style={s.miniHeader}>
+        <Text style={s.miniTitle}>{title}</Text>
+        {entry ? (
+          <View style={s.rankPillSmall}>
+            <Text style={s.rankTextSmall}>#1</Text>
+          </View>
+        ) : null}
+      </View>
+      {entry ? (
+        <>
+          <CrmAvatar name={entry.name} photoUrl={entry.photo_url} size={50} />
+          <Text style={s.miniName} numberOfLines={1}>{entry.name}</Text>
+          <Text style={[s.miniValue, title === 'TALK TIME' && s.talkTimeMini]} numberOfLines={1}>
+            {entry.displayValue}
+          </Text>
+        </>
+      ) : (
+        <Text style={s.emptyDash}>—</Text>
+      )}
+    </View>
+  );
+}
+
+export default function DashboardScreen() {
+  const { user, loading: sessionLoading } = useCrmSession();
+  const [data, setData] = useState<HomeDashboardData>(EMPTY_DATA);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const displayName = user ? getUserDisplayName(user) : 'Agent';
+  const firstName = getFirstName(data.profile?.name ?? displayName);
+  const agentInitials = getInitialsFromName(displayName);
+
+  const loadData = useCallback(async () => {
+    if (!user) {
+      setData(EMPTY_DATA);
+      setLoading(false);
+      return;
+    }
+    try {
+      setData(await fetchHomeDashboardData(user));
+    } catch (e) {
+      console.log('[home] load error', e);
+      setData(EMPTY_DATA);
+    } finally {
+      setLoading(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (!sessionLoading) {
+      setLoading(true);
+      void loadData();
+    }
+  }, [sessionLoading, loadData]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadData();
+    setRefreshing(false);
+  }, [loadData]);
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
 
+  const pipeline = data.pipeline;
+  const stats = data.agentStats;
+
+  const pipelineLegend = useMemo(
+    () => [
+      ['New', HOME.blue, pipeline.newL],
+      ['Hot', HOME.red, pipeline.hot],
+      ['Warm', HOME.amber, pipeline.warm],
+      ['Won', HOME.green, pipeline.won],
+    ] as const,
+    [pipeline],
+  );
+
+  if (sessionLoading || loading) {
+    return (
+      <View style={[s.container, s.centered]}>
+        <ActivityIndicator color={HOME.red} size="large" />
+      </View>
+    );
+  }
+
   return (
     <View style={s.container}>
-      <ProwinHeader agentInitials={agentInitials} />
-      <PageTitle label="CRM overview" title={`${greeting}, ${agentName}`} />
+      <ProwinHeader
+        agentInitials={agentInitials}
+        agentName={data.profile?.name ?? displayName}
+        agentPhotoUrl={data.profile?.photo_url}
+      />
+      <PageTitle label="CRM overview" title={`${greeting}, ${firstName}`} />
 
       <ScrollView
         style={s.scroll}
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.red} />}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={HOME.red} />
+        }
       >
-        {/* Live indicator */}
         <View style={s.liveRow}>
           <View style={s.liveDot} />
           <Text style={s.liveText}>Live · {format(new Date(), 'EEE d MMM yyyy · HH:mm')}</Text>
         </View>
 
-        {/* Clock-in banner */}
         <TouchableOpacity style={s.clockBanner} onPress={() => router.push('/clockin')}>
-          <Ionicons name="time-outline" size={20} color={COLORS.red} />
+          <Ionicons name="time-outline" size={20} color={HOME.red} />
           <Text style={s.clockText}>Clock in / Check attendance</Text>
-          <Ionicons name="chevron-forward" size={16} color={COLORS.red} />
+          <Ionicons name="chevron-forward" size={16} color={HOME.red} />
         </TouchableOpacity>
 
-        {/* Stats */}
-        <View style={s.statsGrid}>
-          <StatCard label="Total Leads" value={String(stats.totalLeads)} sub="+12 this week" subColor={COLORS.green} />
-          <StatCard label="Open Tasks" value={String(stats.openTasks)} sub={stats.openTasks > 0 ? `${stats.openTasks} overdue` : 'All clear'} subColor={stats.openTasks > 0 ? COLORS.red : COLORS.green} />
-        </View>
-        <View style={[s.statsGrid, { marginTop: 8 }]}>
-          <StatCard label="Calls Today" value={String(stats.callsToday)} sub="Target: 10" subColor={COLORS.amber} />
-          <StatCard label="Conversion" value={stats.conversion} sub="This month" subColor={COLORS.green} />
-        </View>
+        <HomeCard title="CALLS · THIS MONTH" accentColor={HOME.blue}>
+          <View style={s.metricsRow}>
+            <MetricColumn
+              label="CONNECTED"
+              value={roundStat(stats.connected)}
+              valueColor={HOME.blue}
+            />
+            <View style={s.metricDivider} />
+            <MetricColumn
+              label="TALK-TIME"
+              value={formatTalkTimeHms(stats.talkTimeSeconds)}
+              wide
+            />
+            <View style={s.metricDivider} />
+            <MetricColumn
+              label="PROSPECTS"
+              value={roundStat(stats.prospects)}
+              valueColor={HOME.amber}
+            />
+          </View>
+        </HomeCard>
 
-        {/* Pipeline */}
-        <Card style={{ marginTop: 12 }}>
-          <Text style={s.pipeLabel}>PIPELINE OVERVIEW</Text>
+        <HomeCard title="LEADS · THIS MONTH" accentColor={HOME.red}>
+          <View style={s.metricsRow}>
+            <MetricColumn
+              label="TOTAL LEADS"
+              value={roundStat(stats.totalLeads)}
+              onPress={() => router.push('/(tabs)/leads')}
+            />
+            <View style={s.metricDivider} />
+            <MetricColumn
+              label="MEETINGS"
+              value={roundStat(stats.meetings)}
+              valueColor={HOME.blue}
+              onPress={() => router.push({ pathname: '/(tabs)/leads', params: { status: 'Meeting Scheduled' } })}
+            />
+            <View style={s.metricDivider} />
+            <MetricColumn
+              label="CLOSINGS"
+              value={roundStat(stats.closings)}
+              valueColor={HOME.green}
+              onPress={() => router.push({ pathname: '/(tabs)/leads', params: { status: 'Booked' } })}
+            />
+          </View>
+        </HomeCard>
+
+        <HomeCard title="PIPELINE OVERVIEW" accentColor={HOME.amber}>
           <View style={s.pipeBar}>
-            <View style={[s.pipeSeg, { flex: pipeline.newL || 1, backgroundColor: COLORS.blue }]} />
-            <View style={[s.pipeSeg, { flex: pipeline.hot || 1, backgroundColor: COLORS.red }]} />
-            <View style={[s.pipeSeg, { flex: pipeline.warm || 1, backgroundColor: COLORS.amber }]} />
-            <View style={[s.pipeSeg, { flex: pipeline.won || 1, backgroundColor: COLORS.green }]} />
+            <View style={[s.pipeSeg, { flex: pipeline.newL || 1, backgroundColor: HOME.blue }]} />
+            <View style={[s.pipeSeg, { flex: pipeline.hot || 1, backgroundColor: HOME.red }]} />
+            <View style={[s.pipeSeg, { flex: pipeline.warm || 1, backgroundColor: HOME.amber }]} />
+            <View style={[s.pipeSeg, { flex: pipeline.won || 1, backgroundColor: HOME.green }]} />
           </View>
           <View style={s.pipeLegend}>
-            {[['New', COLORS.blue, pipeline.newL], ['Hot', COLORS.red, pipeline.hot], ['Warm', COLORS.amber, pipeline.warm], ['Won', COLORS.green, pipeline.won]].map(([label, color, val]) => (
-              <View key={label as string} style={s.legItem}>
-                <View style={[s.legDot, { backgroundColor: color as string }]} />
+            {pipelineLegend.map(([label, color, val]) => (
+              <View key={label} style={s.legItem}>
+                <View style={[s.legDot, { backgroundColor: color }]} />
                 <Text style={s.legText}>{label} {val}</Text>
               </View>
             ))}
           </View>
-        </Card>
+        </HomeCard>
 
-        {/* Upcoming tasks */}
-        {upcomingTasks.length > 0 && (
-          <>
-            <SectionHeader title="upcoming tasks & meetings" />
-            {upcomingTasks.map((task) => {
-              const typeKey = mapTaskTypeFromDb(task.task_type);
-              return (
-              <Card key={task.id} topColor={typeKey === 'meeting' ? COLORS.amber : COLORS.blue} style={{ paddingVertical: 11 }}>
-                <View style={s.taskRow}>
-                  <Ionicons
-                    name={typeKey === 'meeting' ? 'location-outline' : 'checkbox-outline'}
-                    size={18}
-                    color={typeKey === 'meeting' ? COLORS.amber : COLORS.blue}
-                  />
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.taskTitle}>{task.title}</Text>
-                    <Text style={s.taskMeta}>{formatTaskDue(task)}</Text>
-                  </View>
-                </View>
-              </Card>
-              );
-            })}
-          </>
-        )}
+        <View style={s.championsHeader}>
+          <Ionicons name="trophy-outline" size={14} color={HOME.amber} />
+          <Text style={s.championsTitle}>THIS MONTH'S CHAMPIONS</Text>
+        </View>
 
-        {/* Recent leads */}
-        <SectionHeader title="recent leads" />
-        {recentLeads.map((lead) => {
-          const leadStatus = lead.lead_status ?? lead.status ?? 'New';
-          return (
-          <TouchableOpacity key={lead.id} onPress={() => router.push(`/lead/${lead.id}`)}>
-            <Card topColor={leadStatus === 'Hot' ? COLORS.red : leadStatus === 'Warm' ? COLORS.amber : COLORS.blue} style={{ paddingVertical: 11 }}>
-              <View style={s.leadRow}>
-                <LeadAvatar lead={lead} color={COLORS.red} />
-                <View style={{ flex: 1 }}>
-                  <Text style={s.leadName}>{getName(lead)}</Text>
-                  <Text style={s.leadMeta}>{[lead.property_type, lead.area, lead.budget].filter(Boolean).join(' · ')}</Text>
-                </View>
-                <StatusBadge status={leadStatus} />
-              </View>
-            </Card>
-          </TouchableOpacity>
-          );
-        })}
-
-        <TouchableOpacity style={s.seeAll} onPress={() => router.push('/(tabs)/leads')}>
-          <Text style={s.seeAllText}>See all leads →</Text>
-        </TouchableOpacity>
+        <ChampionHero entry={data.champions.revenue} />
+        <View style={s.championRow}>
+          <ChampionMini title="TALK TIME" accentColor={HOME.blue} entry={data.champions.talkTime} />
+          <ChampionMini title="MEETINGS" accentColor={HOME.red} entry={data.champions.meetings} />
+        </View>
 
         <View style={{ height: 24 }} />
       </ScrollView>
@@ -177,30 +333,143 @@ export default function DashboardScreen() {
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg },
+  container: { flex: 1, backgroundColor: HOME.page },
+  centered: { alignItems: 'center', justifyContent: 'center' },
   scroll: { flex: 1, paddingHorizontal: 14 },
   liveRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, marginBottom: 10 },
-  liveDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: COLORS.green },
-  liveText: { fontSize: 11, color: COLORS.muted },
+  liveDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: HOME.green },
+  liveText: { fontSize: 11, color: HOME.label },
   clockBanner: {
-    backgroundColor: COLORS.redLight, borderWidth: 1, borderColor: COLORS.redBorder,
-    borderRadius: 12, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12,
+    backgroundColor: '#fdf2f1',
+    borderWidth: 0.5,
+    borderColor: '#f5d0cc',
+    borderRadius: 12,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
   },
-  clockText: { flex: 1, fontSize: 13, fontWeight: '700', color: COLORS.red },
-  statsGrid: { flexDirection: 'row', gap: 8 },
-  pipeLabel: { fontSize: 10, fontWeight: '700', color: COLORS.muted, letterSpacing: 0.6, marginBottom: 10 },
+  clockText: { flex: 1, fontSize: 13, fontWeight: '700', color: HOME.red },
+  card: {
+    backgroundColor: HOME.card,
+    borderRadius: 16,
+    borderWidth: 0.5,
+    borderColor: HOME.border,
+    borderTopWidth: 2.5,
+    padding: 14,
+    marginBottom: 12,
+  },
+  cardTitle: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: HOME.label,
+    letterSpacing: 0.8,
+    marginBottom: 12,
+  },
+  metricsRow: { flexDirection: 'row', alignItems: 'stretch' },
+  metricCol: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 4 },
+  metricColWide: { flex: 1.25 },
+  metricDivider: { width: 0.5, backgroundColor: HOME.border, marginVertical: 2 },
+  metricLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: HOME.label,
+    letterSpacing: 0.5,
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  metricValue: {
+    fontSize: 24,
+    fontWeight: '500',
+    color: HOME.text,
+    textAlign: 'center',
+  },
+  metricValueWide: {
+    fontSize: 18,
+    fontWeight: '600',
+  },
   pipeBar: { flexDirection: 'row', gap: 3, height: 8, borderRadius: 4, overflow: 'hidden', marginBottom: 8 },
   pipeSeg: { borderRadius: 2 },
   pipeLegend: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   legItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   legDot: { width: 8, height: 8, borderRadius: 2 },
-  legText: { fontSize: 11, color: COLORS.muted },
-  taskRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  taskTitle: { fontSize: 13, fontWeight: '700', color: COLORS.text },
-  taskMeta: { fontSize: 11, color: COLORS.muted, marginTop: 2 },
-  leadRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  leadName: { fontSize: 13, fontWeight: '700', color: COLORS.text },
-  leadMeta: { fontSize: 11, color: COLORS.muted, marginTop: 2 },
-  seeAll: { alignItems: 'center', paddingVertical: 12 },
-  seeAllText: { fontSize: 13, fontWeight: '700', color: COLORS.red },
+  legText: { fontSize: 11, color: HOME.label },
+  championsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginBottom: 10,
+    marginTop: 4,
+  },
+  championsTitle: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: HOME.label,
+    letterSpacing: 0.8,
+  },
+  heroCard: {
+    backgroundColor: HOME.card,
+    borderRadius: 16,
+    borderWidth: 0.5,
+    borderColor: HOME.border,
+    borderTopWidth: 2.5,
+    padding: 16,
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  heroLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: HOME.label,
+    letterSpacing: 0.6,
+    marginBottom: 10,
+    marginTop: 4,
+  },
+  heroName: { fontSize: 16, fontWeight: '800', color: HOME.text, marginTop: 10 },
+  heroRole: { fontSize: 12, color: HOME.label, marginTop: 2, textTransform: 'capitalize' },
+  heroValue: { fontSize: 22, fontWeight: '700', color: HOME.green, marginTop: 8 },
+  rankPillWrap: { position: 'absolute', top: 12, right: 12 },
+  rankPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#fef3e0',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  rankText: { fontSize: 11, fontWeight: '800', color: HOME.amber },
+  championRow: { flexDirection: 'row', gap: 10, marginBottom: 12 },
+  miniCard: {
+    flex: 1,
+    backgroundColor: HOME.card,
+    borderRadius: 16,
+    borderWidth: 0.5,
+    borderColor: HOME.border,
+    borderTopWidth: 2.5,
+    padding: 12,
+    alignItems: 'center',
+    minHeight: 140,
+  },
+  miniHeader: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  miniTitle: { fontSize: 10, fontWeight: '700', color: HOME.label, letterSpacing: 0.5 },
+  rankPillSmall: {
+    backgroundColor: '#fef3e0',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  rankTextSmall: { fontSize: 10, fontWeight: '800', color: HOME.amber },
+  miniName: { fontSize: 12, fontWeight: '700', color: HOME.text, marginTop: 8, textAlign: 'center' },
+  miniValue: { fontSize: 16, fontWeight: '600', color: HOME.text, marginTop: 4 },
+  talkTimeMini: { fontSize: 14 },
+  emptyDash: { fontSize: 24, fontWeight: '500', color: HOME.label, marginVertical: 16 },
 });

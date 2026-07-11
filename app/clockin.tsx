@@ -9,6 +9,7 @@ import * as Location from 'expo-location';
 import { format, parseISO } from 'date-fns';
 import { supabase, COLORS } from '../lib/supabase';
 import { Card } from '../components/ui';
+import { SafeScreenHeader } from '../components/SafeScreenHeader';
 import { getName, getLeadInitials } from '../lib/leadName';
 import { resolveEmployeeIdForUser } from '../lib/callLog';
 import { getUserDisplayName } from '../hooks/useCrmSession';
@@ -190,13 +191,15 @@ export default function ClockInScreen() {
 
   return (
     <View style={s.container}>
-      <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
-          <Ionicons name="chevron-down" size={24} color={COLORS.text} />
-        </TouchableOpacity>
-        <Text style={s.headerTitle}>Attendance</Text>
-        <View style={{ width: 40 }} />
-      </View>
+      <SafeScreenHeader
+        title="Attendance"
+        onBack={() => router.back()}
+        leftContent={
+          <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
+            <Ionicons name="chevron-down" size={24} color={COLORS.text} />
+          </TouchableOpacity>
+        }
+      />
 
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}>
         <View style={s.timeCard}>
@@ -325,9 +328,7 @@ export default function ClockInScreen() {
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, backgroundColor: COLORS.white, borderBottomWidth: 1, borderBottomColor: COLORS.border },
-  backBtn: { width: 40, alignItems: 'flex-start' },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: COLORS.text },
+  backBtn: { width: 40, height: 40, alignItems: 'flex-start', justifyContent: 'center' },
   scroll: { flex: 1, padding: 14 },
   timeCard: { backgroundColor: COLORS.navy, borderRadius: 18, padding: 22, marginBottom: 20, alignItems: 'center' },
   timeText: { fontSize: 44, fontWeight: '800', color: '#fff', letterSpacing: -1 },

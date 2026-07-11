@@ -1,65 +1,95 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, StyleSheet,
-  TextInput, Linking, RefreshControl, Modal,
-  ActivityIndicator,
+  View, Text, StyleSheet, TextInput, Linking, RefreshControl, Modal,
+  ActivityIndicator, FlatList, TouchableOpacity, ScrollView, Pressable,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { supabase, COLORS } from '../../lib/supabase';
-import {
-  ProwinHeader, PageTitle, StatusBadge,
-  AISummary, ActionButtons, Card, LeadAvatar,
-} from '../../components/ui';
-import { LeadOptionPicker } from '../../components/LeadOptionPicker';
-import { AddNoteModal } from '../../components/AddNoteModal';
+import { supabase } from '../../lib/supabase';
+import { ProwinHeader } from '../../components/ui';
+import { LeadCompactCard } from '../../components/leads/LeadCompactCard';
+import { LeadStatusTabsPager } from '../../components/leads/LeadStatusTabsPager';
 import { generateFollowUpMessage } from '../../lib/ai';
 import { getName } from '../../lib/leadName';
-import { useCrmSession, getUserDisplayName } from '../../hooks/useCrmSession';
+import { useCrmSession } from '../../hooks/useCrmSession';
+import { fetchActiveStatusOptions } from '../../lib/leadStatus';
+import { filterLeadsForUser, resolveUserEmployeeId } from '../../lib/rbac';
 import {
-  fetchActiveStatusOptions,
-  fetchActiveReasonOptions,
-  updateLeadStatus,
-  updateLeadStatusReason,
-  addLeadNote,
-} from '../../lib/leadStatus';
-import {
-  filterLeadsForUser, resolveUserEmployeeId, canSeeAllLeads,
-} from '../../lib/rbac';
-import {
-  getLeadAreaLabel, getLeadInterest, isLeadArchived, matchesLeadSearch,
+  getLeadAreaLabel,
+  isLeadArchived,
+  matchesLeadSearch,
+  getLeadPipelineStatus,
+  isLeadActiveForStats,
+  LEAD_STATUS_CALLBACK,
+  LEAD_STATUS_MEETING_SCHEDULED,
 } from '../../lib/leadFields';
 import { setLeadNavIds } from '../../lib/leadNav';
+import { THEME } from '../../lib/prowinTheme';
+
+type QuickStatFilter = null | 'total' | 'active' | 'callback' | 'meetings';
+
+const STAT_COLORS = {
+  total: '#1a1a1a',
+  active: '#1FA971',
+  callback: '#E28A2B',
+  meetings: '#2563EB',
+  label: '#999999',
+  border: '#ececec',
+};
+
+function StatCard({
+  label,
+  value,
+  accentColor,
+  tintBg,
+  selected,
+  onPress,
+}: {
+  label: string;
+  value: number;
+  accentColor: string;
+  tintBg: string;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      style={[
+        s.statCard,
+        { borderTopColor: accentColor },
+        selected && { backgroundColor: tintBg, borderColor: accentColor },
+      ]}
+      onPress={onPress}
+    >
+      <Text style={[s.statValue, { color: accentColor }]}>{Math.round(value)}</Text>
+      <Text style={s.statLabel}>{label}</Text>
+    </Pressable>
+  );
+}
 
 export default function LeadsScreen() {
   const { user, role, canManageStatuses, loading: sessionLoading } = useCrmSession();
+  const { status: initialStatus } = useLocalSearchParams<{ status?: string }>();
   const [leads, setLeads] = useState<any[]>([]);
   const [search, setSearch] = useState('');
-  const [activeFilter, setActiveFilter] = useState('All');
-  const [showArchived, setShowArchived] = useState(false);
+  const [activeTabIndex, setActiveTabIndex] = useState(0);
+  const [quickFilter, setQuickFilter] = useState<QuickStatFilter>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [selectedLead, setSelectedLead] = useState<any>(null);
-  const [noteLead, setNoteLead] = useState<any>(null);
-  const [noteModal, setNoteModal] = useState(false);
   const [msgModal, setMsgModal] = useState(false);
   const [generatedMsg, setGeneratedMsg] = useState('');
   const [msgLoading, setMsgLoading] = useState(false);
   const [msgType, setMsgType] = useState<'whatsapp' | 'email'>('whatsapp');
   const [statusOptions, setStatusOptions] = useState<string[]>([]);
-  const [reasonOptions, setReasonOptions] = useState<string[]>([]);
 
-  async function loadOptions() {
-    const [statuses, reasons] = await Promise.all([
-      fetchActiveStatusOptions(),
-      fetchActiveReasonOptions(),
-    ]);
+  const loadOptions = useCallback(async () => {
+    const statuses = await fetchActiveStatusOptions();
     setStatusOptions(statuses.map(o => o.name));
-    setReasonOptions(reasons.map(o => o.name));
-  }
+  }, []);
 
-  async function fetchLeads() {
+  const fetchLeads = useCallback(async () => {
     const { data, error } = await supabase
       .from('leads')
       .select('*')
@@ -71,75 +101,139 @@ export default function LeadsScreen() {
     }
     if (error) console.log('Leads fetch error:', error.message);
     setLoading(false);
-  }
+  }, [user, role]);
 
-  function getLeadStatus(lead: any) {
-    return lead.lead_status ?? lead.status ?? 'Prospects';
-  }
+  const getLeadStatus = useCallback((lead: any) => getLeadPipelineStatus(lead), []);
 
-  const visibleLeads = useMemo(() => {
-    if (showArchived && canSeeAllLeads(role)) return leads;
-    return leads.filter(l => !isLeadArchived(l));
-  }, [leads, showArchived, role]);
-
-  const filtered = useMemo(() => {
-    let result = visibleLeads;
-    if (activeFilter !== 'All') {
-      result = result.filter(l => getLeadStatus(l) === activeFilter);
+  const listBaseLeads = useMemo(() => {
+    switch (quickFilter) {
+      case 'total':
+        return leads;
+      case 'active':
+        return leads.filter(isLeadActiveForStats);
+      case 'callback':
+        return leads.filter(l => getLeadStatus(l) === LEAD_STATUS_CALLBACK);
+      case 'meetings':
+        return leads.filter(l => getLeadStatus(l) === LEAD_STATUS_MEETING_SCHEDULED);
+      default:
+        return leads.filter(l => !isLeadArchived(l));
     }
-    if (search.trim()) {
-      result = result.filter(l => matchesLeadSearch(l, search, getName));
+  }, [leads, quickFilter, getLeadStatus]);
+
+  const statCounts = useMemo(() => ({
+    total: leads.length,
+    active: leads.filter(isLeadActiveForStats).length,
+    callback: leads.filter(l => getLeadStatus(l) === LEAD_STATUS_CALLBACK).length,
+    meetings: leads.filter(l => getLeadStatus(l) === LEAD_STATUS_MEETING_SCHEDULED).length,
+  }), [leads, getLeadStatus]);
+
+  const filterOptions = useMemo(() => ['All', ...statusOptions], [statusOptions]);
+
+  const tabs = useMemo(() => {
+    return filterOptions.map(label => ({
+      key: label,
+      label,
+      count: label === 'All'
+        ? listBaseLeads.length
+        : listBaseLeads.filter(l => getLeadStatus(l) === label).length,
+    }));
+  }, [filterOptions, listBaseLeads, getLeadStatus]);
+
+  const leadsByTab = useMemo(() => {
+    return filterOptions.map(filter => {
+      let result = listBaseLeads;
+      if (filter !== 'All') {
+        result = result.filter(l => getLeadStatus(l) === filter);
+      }
+      if (search.trim()) {
+        result = result.filter(l => matchesLeadSearch(l, search, getName));
+      }
+      return result;
+    });
+  }, [filterOptions, listBaseLeads, search, getLeadStatus]);
+
+  const handleStatCardPress = useCallback((filter: QuickStatFilter) => {
+    if (quickFilter === filter) {
+      setQuickFilter(null);
+      setActiveTabIndex(0);
+      return;
     }
-    return result;
-  }, [visibleLeads, activeFilter, search]);
+    setQuickFilter(filter);
+    if (filter === 'callback') {
+      const idx = filterOptions.indexOf(LEAD_STATUS_CALLBACK);
+      setActiveTabIndex(idx >= 0 ? idx : 0);
+    } else if (filter === 'meetings') {
+      const idx = filterOptions.indexOf(LEAD_STATUS_MEETING_SCHEDULED);
+      setActiveTabIndex(idx >= 0 ? idx : 0);
+    } else {
+      setActiveTabIndex(0);
+    }
+  }, [quickFilter, filterOptions]);
+
+  const handleTabIndexChange = useCallback((index: number) => {
+    setQuickFilter(null);
+    setActiveTabIndex(index);
+  }, []);
 
   useEffect(() => {
     loadOptions();
     fetchLeads();
-  }, []);
+  }, [loadOptions, fetchLeads]);
+
+  useEffect(() => {
+    if (activeTabIndex >= filterOptions.length) {
+      setActiveTabIndex(0);
+    }
+  }, [activeTabIndex, filterOptions.length]);
+
+  useEffect(() => {
+    if (!initialStatus?.trim() || !filterOptions.length) return;
+    const idx = filterOptions.findIndex(
+      opt => opt.toLowerCase() === initialStatus.trim().toLowerCase(),
+    );
+    if (idx >= 0) {
+      setActiveTabIndex(idx);
+      const status = initialStatus.trim();
+      if (status.toLowerCase() === LEAD_STATUS_CALLBACK.toLowerCase()) {
+        setQuickFilter('callback');
+      } else if (status.toLowerCase() === LEAD_STATUS_MEETING_SCHEDULED.toLowerCase()) {
+        setQuickFilter('meetings');
+      }
+    }
+  }, [initialStatus, filterOptions]);
 
   useFocusEffect(
     useCallback(() => {
       loadOptions();
-    }, []),
+    }, [loadOptions]),
   );
 
-  const onRefresh = async () => {
+  const onRefresh = useCallback(async () => {
     setRefreshing(true);
     await Promise.all([loadOptions(), fetchLeads()]);
     setRefreshing(false);
-  };
+  }, [loadOptions, fetchLeads]);
 
-  function handleCall(phone: string) {
+  const handleCall = useCallback((phone: string) => {
     Linking.openURL(`tel:${phone}`);
-  }
+  }, []);
 
-  function handleWhatsApp(phone: string, lead: any) {
+  const handleWhatsApp = useCallback(async (phone: string, lead: any) => {
     setSelectedLead(lead);
     setMsgType('whatsapp');
-    openMsgModal(lead, 'whatsapp');
-  }
-
-  function handleEmail(email: string, lead: any) {
-    setSelectedLead(lead);
-    setMsgType('email');
-    openMsgModal(lead, 'email');
-  }
-
-  async function openMsgModal(lead: any, type: 'whatsapp' | 'email') {
     setMsgModal(true);
     setGeneratedMsg('');
     setMsgLoading(true);
     const msg = await generateFollowUpMessage(
       getName(lead),
       [lead.property_type, getLeadAreaLabel(lead), lead.budget].filter(Boolean).join(' in '),
-      type
+      'whatsapp',
     );
     setGeneratedMsg(msg);
     setMsgLoading(false);
-  }
+  }, []);
 
-  function sendMessage() {
+  const sendMessage = useCallback(() => {
     if (!selectedLead) return;
     if (msgType === 'whatsapp') {
       const phone = selectedLead.phone?.replace(/\D/g, '');
@@ -148,51 +242,46 @@ export default function LeadsScreen() {
       Linking.openURL(`mailto:${selectedLead.email}?body=${encodeURIComponent(generatedMsg)}`);
     }
     setMsgModal(false);
-  }
+  }, [selectedLead, msgType, generatedMsg]);
 
-  async function handleStatusChange(lead: any, newStatus: string) {
-    const oldStatus = getLeadStatus(lead);
-    if (oldStatus === newStatus) return;
-    const doneBy = user ? getUserDisplayName(user) : 'Unknown';
-    await updateLeadStatus(lead.id, oldStatus, newStatus, doneBy);
-    fetchLeads();
-  }
-
-  async function handleReasonChange(lead: any, newReason: string) {
-    const oldReason = lead.status_reason ?? null;
-    if (oldReason === newReason) return;
-    const doneBy = user ? getUserDisplayName(user) : 'Unknown';
-    await updateLeadStatusReason(lead.id, oldReason, newReason, doneBy);
-    fetchLeads();
-  }
-
-  function openLeadDetail(lead: any) {
-    setLeadNavIds(filtered.map(l => l.id));
+  const openLeadDetail = useCallback((lead: any) => {
+    const pageLeads = leadsByTab[activeTabIndex] ?? [];
+    setLeadNavIds(pageLeads.map(l => l.id));
     router.push(`/lead/${lead.id}`);
-  }
+  }, [activeTabIndex, leadsByTab]);
 
-  async function handleSaveNote(note: string) {
-    if (!noteLead) return;
-    const doneBy = user ? getUserDisplayName(user) : 'Unknown';
-    await addLeadNote(noteLead.id, note, doneBy);
-    setNoteLead(null);
-    fetchLeads();
-  }
-
-  function getTopBorderColor(status: string) {
-    if (status === 'Hot' || status === 'Not Interested') return COLORS.red;
-    if (status === 'Warm' || status === 'Callback' || status === 'Pending') return COLORS.amber;
-    if (status === 'Won' || status === 'Booked' || status === 'Invoiced') return COLORS.green;
-    return COLORS.blue;
-  }
-
-  const filterOptions = ['All', ...statusOptions];
-  const counts = filterOptions.reduce((acc, f) => {
-    acc[f] = f === 'All'
-      ? visibleLeads.length
-      : visibleLeads.filter(l => getLeadStatus(l) === f).length;
-    return acc;
-  }, {} as Record<string, number>);
+  const renderLeadPage = useCallback((tabIndex: number) => {
+    const pageLeads = leadsByTab[tabIndex] ?? [];
+    return (
+      <FlatList
+        data={pageLeads}
+        keyExtractor={item => item.id}
+        style={s.list}
+        contentContainerStyle={pageLeads.length === 0 ? s.listEmptyContent : s.listContent}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          tabIndex === activeTabIndex
+            ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.red} />
+            : undefined
+        }
+        ListEmptyComponent={
+          <View style={s.empty}>
+            <Ionicons name="people-outline" size={48} color={THEME.meta} />
+            <Text style={s.emptyText}>No leads found</Text>
+          </View>
+        }
+        renderItem={({ item }) => (
+          <LeadCompactCard
+            lead={item}
+            statusLabel={getLeadStatus(item)}
+            onPress={() => openLeadDetail(item)}
+            onCall={() => handleCall(item.phone)}
+            onWhatsApp={() => handleWhatsApp(item.phone, item)}
+          />
+        )}
+      />
+    );
+  }, [activeTabIndex, leadsByTab, refreshing, onRefresh, getLeadStatus, openLeadDetail, handleCall, handleWhatsApp]);
 
   return (
     <View style={s.container}>
@@ -204,7 +293,7 @@ export default function LeadsScreen() {
                 style={s.settingsBtn}
                 onPress={() => router.push('/lead/manage-statuses')}
               >
-                <Ionicons name="settings-outline" size={20} color={COLORS.red} />
+                <Ionicons name="settings-outline" size={20} color={THEME.red} />
               </TouchableOpacity>
             )}
             <TouchableOpacity style={s.addBtn} onPress={() => router.push('/lead/new')}>
@@ -213,262 +302,181 @@ export default function LeadsScreen() {
           </View>
         }
       />
-      <PageTitle label={`CRM · ${visibleLeads.length} active leads`} title="Leads" />
+
+      <View style={s.statsRow}>
+        <StatCard
+          label="TOTAL"
+          value={statCounts.total}
+          accentColor={STAT_COLORS.total}
+          tintBg="#f3f3f3"
+          selected={quickFilter === 'total'}
+          onPress={() => handleStatCardPress('total')}
+        />
+        <StatCard
+          label="ACTIVE"
+          value={statCounts.active}
+          accentColor={STAT_COLORS.active}
+          tintBg="#e9f7ef"
+          selected={quickFilter === 'active'}
+          onPress={() => handleStatCardPress('active')}
+        />
+        <StatCard
+          label="CALLBACK"
+          value={statCounts.callback}
+          accentColor={STAT_COLORS.callback}
+          tintBg="#fef3e0"
+          selected={quickFilter === 'callback'}
+          onPress={() => handleStatCardPress('callback')}
+        />
+        <StatCard
+          label="MEETINGS"
+          value={statCounts.meetings}
+          accentColor={STAT_COLORS.meetings}
+          tintBg="#eef4fc"
+          selected={quickFilter === 'meetings'}
+          onPress={() => handleStatCardPress('meetings')}
+        />
+      </View>
 
       <View style={s.searchWrap}>
-        <Ionicons name="search-outline" size={16} color={COLORS.muted} style={s.searchIcon} />
+        <Ionicons name="search-outline" size={16} color={THEME.meta} style={s.searchIcon} />
         <TextInput
           style={s.searchInput}
           placeholder="Search by name, phone, area, budget..."
-          placeholderTextColor={COLORS.muted}
+          placeholderTextColor={THEME.meta}
           value={search}
           onChangeText={setSearch}
         />
         {search.length > 0 && (
           <TouchableOpacity onPress={() => setSearch('')}>
-            <Ionicons name="close-circle" size={16} color={COLORS.muted} />
+            <Ionicons name="close-circle" size={16} color={THEME.meta} />
           </TouchableOpacity>
         )}
       </View>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.pillsScroll} contentContainerStyle={s.pills}>
-        {filterOptions.map(f => (
-          <TouchableOpacity
-            key={f}
-            style={[s.pill, activeFilter === f && s.pillActive]}
-            onPress={() => setActiveFilter(f)}
-          >
-            <Text style={[s.pillText, activeFilter === f && s.pillTextActive]}>
-              {f} {counts[f] > 0 ? counts[f] : ''}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
-
-      <View style={s.countRow}>
-        <Text style={s.countText}>Showing {filtered.length} lead{filtered.length !== 1 ? 's' : ''}</Text>
-        {canSeeAllLeads(role) && (
-          <TouchableOpacity onPress={() => setShowArchived(v => !v)}>
-            <Text style={s.archivedToggle}>
-              {showArchived ? 'Hide archived' : 'Show archived'}
-            </Text>
-          </TouchableOpacity>
-        )}
-      </View>
-
-      {loading
-        ? <ActivityIndicator color={COLORS.red} style={{ marginTop: 40 }} />
-        : (
-          <ScrollView
-            style={s.list}
-            showsVerticalScrollIndicator={false}
-            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.red} />}
-          >
-            {filtered.length === 0 && (
-              <View style={s.empty}>
-                <Ionicons name="people-outline" size={48} color={COLORS.muted} />
-                <Text style={s.emptyText}>No leads found</Text>
-              </View>
-            )}
-            {filtered.map((lead) => {
-              const leadStatus = getLeadStatus(lead);
-              const displayName = getName(lead);
-              return (
-                <Card key={lead.id} topColor={getTopBorderColor(leadStatus)}>
-                  <TouchableOpacity
-                    style={s.leadTopTap}
-                    activeOpacity={0.75}
-                    onPress={() => openLeadDetail(lead)}
-                  >
-                    <LeadAvatar lead={lead} color={getTopBorderColor(leadStatus)} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.leadName}>{displayName}</Text>
-                      <View style={s.phoneRow}>
-                        <Ionicons name="call-outline" size={11} color={COLORS.muted} />
-                        <Text style={s.leadPhone}>{lead.phone}</Text>
-                      </View>
-                      <Text style={s.interestTag}>Interest: {getLeadInterest(lead)}</Text>
-                    </View>
-                  </TouchableOpacity>
-                  <View style={s.badgeRow}>
-                    <StatusBadge status={leadStatus} />
-                    <Text style={s.timeAgo}>
-                      {lead.last_contacted_at
-                        ? new Date(lead.last_contacted_at).toLocaleDateString()
-                        : new Date(lead.created_at).toLocaleDateString()}
-                    </Text>
-                  </View>
-
-                  <View style={s.propGrid}>
-                    <View style={s.propTile}>
-                      <Text style={s.propLabel}>PROPERTY</Text>
-                      <Text style={s.propVal}>{lead.property_type ?? '—'}</Text>
-                    </View>
-                    <View style={s.propTile}>
-                      <Text style={s.propLabel}>AREA</Text>
-                      <Text style={s.propVal}>{getLeadAreaLabel(lead) || '—'}</Text>
-                    </View>
-                    <View style={s.propTile}>
-                      <Text style={s.propLabel}>BUDGET</Text>
-                      <Text style={s.propVal}>{lead.budget ?? '—'}</Text>
-                    </View>
-                    <View style={s.propTile}>
-                      <Text style={s.propLabel}>ASSIGNED</Text>
-                      <Text style={s.propVal}>{lead.assigned_agent_name?.trim() || '—'}</Text>
-                    </View>
-                  </View>
-
-                  {lead.ai_summary && <AISummary text={lead.ai_summary} />}
-
-                  <View style={s.statusPickers}>
-                    <LeadOptionPicker
-                      label="Status"
-                      value={leadStatus}
-                      options={statusOptions}
-                      onChange={v => handleStatusChange(lead, v)}
-                      compact
-                    />
-                    <LeadOptionPicker
-                      label="Status Reason"
-                      value={lead.status_reason}
-                      options={reasonOptions}
-                      onChange={v => handleReasonChange(lead, v)}
-                      compact
-                    />
-                  </View>
-
-                  <TouchableOpacity
-                    style={s.noteBtn}
-                    onPress={() => { setNoteLead(lead); setNoteModal(true); }}
-                  >
-                    <Ionicons name="create-outline" size={14} color={COLORS.red} />
-                    <Text style={s.noteBtnText}>Add note</Text>
-                  </TouchableOpacity>
-
-                  <View style={s.divider} />
-
-                  <ActionButtons
-                    onCall={() => handleCall(lead.phone)}
-                    onWhatsApp={() => handleWhatsApp(lead.phone, lead)}
-                    onEmail={() => handleEmail(lead.email, lead)}
-                    onView={() => openLeadDetail(lead)}
-                  />
-                </Card>
-              );
-            })}
-            <View style={{ height: 24 }} />
-          </ScrollView>
-        )}
+      {loading ? (
+        <ActivityIndicator color={THEME.red} style={{ marginTop: 40 }} />
+      ) : (
+        <LeadStatusTabsPager
+          tabs={tabs}
+          activeIndex={activeTabIndex}
+          onIndexChange={handleTabIndexChange}
+          renderPage={(_, index) => renderLeadPage(index)}
+        />
+      )}
 
       <Modal visible={msgModal} animationType="slide" presentationStyle="pageSheet">
         <View style={s.modal}>
           <View style={s.modalHeader}>
-            <Text style={s.modalTitle}>
-              {msgType === 'whatsapp' ? 'WhatsApp Message' : 'Email'} — AI drafted
-            </Text>
+            <Text style={s.modalTitle}>WhatsApp Message — AI drafted</Text>
             <TouchableOpacity onPress={() => setMsgModal(false)}>
-              <Ionicons name="close" size={24} color={COLORS.text} />
+              <Ionicons name="close" size={24} color={THEME.heading} />
             </TouchableOpacity>
           </View>
-          {msgLoading
-            ? (
-              <View style={s.modalLoading}>
-                <ActivityIndicator color={COLORS.red} size="large" />
-                <Text style={s.modalLoadingText}>AI is drafting your message...</Text>
-              </View>
-            )
-            : (
-              <ScrollView style={s.modalBody}>
-                <View style={s.aiBox}>
-                  <View style={s.aiHeader}>
-                    <Ionicons name="sparkles" size={13} color={COLORS.red} />
-                    <Text style={s.aiLabel}>AI-drafted message — edit before sending</Text>
-                  </View>
-                  <Text style={s.msgText}>{generatedMsg}</Text>
+          {msgLoading ? (
+            <View style={s.modalLoading}>
+              <ActivityIndicator color={THEME.red} size="large" />
+              <Text style={s.modalLoadingText}>AI is drafting your message...</Text>
+            </View>
+          ) : (
+            <ScrollView style={s.modalBody}>
+              <View style={s.aiBox}>
+                <View style={s.aiHeader}>
+                  <Ionicons name="sparkles" size={13} color={THEME.red} />
+                  <Text style={s.aiLabel}>AI-drafted message — edit before sending</Text>
                 </View>
-                <TouchableOpacity style={s.sendBtn} onPress={sendMessage}>
-                  <Ionicons name={msgType === 'whatsapp' ? 'logo-whatsapp' : 'mail'} size={18} color="#fff" />
-                  <Text style={s.sendBtnText}>
-                    Open in {msgType === 'whatsapp' ? 'WhatsApp' : 'Mail'}
-                  </Text>
-                </TouchableOpacity>
-              </ScrollView>
-            )}
+                <Text style={s.msgText}>{generatedMsg}</Text>
+              </View>
+              <TouchableOpacity style={s.sendBtn} onPress={sendMessage}>
+                <Text style={s.sendBtnText}>Open in WhatsApp</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          )}
         </View>
       </Modal>
-
-      <AddNoteModal
-        visible={noteModal}
-        onClose={() => { setNoteModal(false); setNoteLead(null); }}
-        onSave={handleSaveNote}
-        title={noteLead ? `Note — ${getName(noteLead)}` : 'Add note'}
-      />
     </View>
   );
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg },
+  container: { flex: 1, backgroundColor: THEME.page },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   settingsBtn: {
     width: 32, height: 32, borderRadius: 16,
-    backgroundColor: COLORS.redLight,
+    backgroundColor: THEME.redTintFill,
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: COLORS.redBorder,
+    borderWidth: 1, borderColor: THEME.redTintBorder,
   },
-  addBtn: { width: 32, height: 32, borderRadius: 16, backgroundColor: COLORS.red, alignItems: 'center', justifyContent: 'center' },
-  searchWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, marginHorizontal: 14, marginTop: 12, marginBottom: 8, paddingHorizontal: 12, paddingVertical: 2 },
-  searchIcon: { marginRight: 6 },
-  searchInput: { flex: 1, fontSize: 13, color: COLORS.text, paddingVertical: 9 },
-  pillsScroll: { flexGrow: 0 },
-  pills: { paddingHorizontal: 14, gap: 6, paddingBottom: 4 },
-  pill: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white },
-  pillActive: { backgroundColor: COLORS.red, borderColor: COLORS.red },
-  pillText: { fontSize: 12, fontWeight: '600', color: COLORS.muted },
-  pillTextActive: { color: '#fff' },
-  countRow: { paddingHorizontal: 14, paddingVertical: 8, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  countText: { fontSize: 11, color: COLORS.muted, fontWeight: '500' },
-  archivedToggle: { fontSize: 11, fontWeight: '700', color: COLORS.red },
-  list: { flex: 1, paddingHorizontal: 14 },
-  empty: { alignItems: 'center', paddingTop: 60, gap: 12 },
-  emptyText: { fontSize: 15, color: COLORS.muted },
-  leadTopTap: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginBottom: 6 },
-  badgeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
-  leadName: { fontSize: 14, fontWeight: '800', color: COLORS.text },
-  phoneRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2 },
-  leadPhone: { fontSize: 11, color: COLORS.muted },
-  interestTag: { fontSize: 10, color: COLORS.amber, fontWeight: '700', marginTop: 3 },
-  timeAgo: { fontSize: 10, color: COLORS.muted },
-  noteBtn: {
+  addBtn: {
+    width: 32, height: 32, borderRadius: 16,
+    backgroundColor: THEME.red,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  statsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    alignSelf: 'flex-start',
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 8,
-    backgroundColor: COLORS.redLight,
-    borderWidth: 1,
-    borderColor: COLORS.redBorder,
-    marginBottom: 8,
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 4,
   },
-  noteBtnText: { fontSize: 12, fontWeight: '700', color: COLORS.red },
-  propGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 },
-  propTile: { flex: 1, minWidth: '45%', backgroundColor: COLORS.bg, borderRadius: 8, padding: 8 },
-  propLabel: { fontSize: 9, fontWeight: '700', color: COLORS.muted, letterSpacing: 0.4, marginBottom: 2 },
-  propVal: { fontSize: 12, fontWeight: '700', color: COLORS.text },
-  statusPickers: { flexDirection: 'row', gap: 8, marginBottom: 10 },
-  divider: { height: 1, backgroundColor: COLORS.border, marginBottom: 10 },
-  modal: { flex: 1, backgroundColor: COLORS.bg },
-  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 18, backgroundColor: COLORS.white, borderBottomWidth: 1, borderBottomColor: COLORS.border },
-  modalTitle: { fontSize: 16, fontWeight: '800', color: COLORS.text },
+  statCard: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 0.5,
+    borderColor: STAT_COLORS.border,
+    borderTopWidth: 2,
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statValue: {
+    fontSize: 20,
+    fontWeight: '500',
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: 8,
+    fontWeight: '700',
+    color: STAT_COLORS.label,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    textAlign: 'center',
+  },
+  searchWrap: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: THEME.card, borderWidth: 1, borderColor: THEME.border,
+    borderRadius: 12, marginHorizontal: 14, marginTop: 8, marginBottom: 8,
+    paddingHorizontal: 12, paddingVertical: 2,
+  },
+  searchIcon: { marginRight: 6 },
+  searchInput: { flex: 1, fontSize: 13, color: THEME.heading, paddingVertical: 9 },
+  list: { flex: 1, paddingHorizontal: 14 },
+  listContent: { paddingBottom: 24 },
+  listEmptyContent: { flexGrow: 1, paddingBottom: 24 },
+  empty: { alignItems: 'center', paddingTop: 60, gap: 12 },
+  emptyText: { fontSize: 15, color: THEME.meta },
+  modal: { flex: 1, backgroundColor: THEME.page },
+  modalHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    padding: 18, backgroundColor: THEME.card,
+    borderBottomWidth: 1, borderBottomColor: THEME.border,
+  },
+  modalTitle: { fontSize: 16, fontWeight: '800', color: THEME.heading },
   modalLoading: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
-  modalLoadingText: { fontSize: 14, color: COLORS.muted },
-  modalBody: { flex: 1, padding: 14 },
-  aiBox: { backgroundColor: COLORS.redLight, borderWidth: 1, borderColor: COLORS.redBorder, borderRadius: 12, padding: 14, marginBottom: 16 },
+  modalLoadingText: { fontSize: 14, color: THEME.meta },
+  modalBody: { padding: 14 },
+  aiBox: {
+    backgroundColor: THEME.redTintFill, borderWidth: 1, borderColor: THEME.redTintBorder,
+    borderRadius: 12, padding: 14, marginBottom: 16,
+  },
   aiHeader: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 8 },
-  aiLabel: { fontSize: 11, fontWeight: '700', color: COLORS.red },
-  msgText: { fontSize: 14, color: COLORS.text, lineHeight: 22 },
-  sendBtn: { backgroundColor: COLORS.red, borderRadius: 12, paddingVertical: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  aiLabel: { fontSize: 11, fontWeight: '700', color: THEME.red },
+  msgText: { fontSize: 14, color: THEME.heading, lineHeight: 22 },
+  sendBtn: {
+    backgroundColor: THEME.red, borderRadius: 12, paddingVertical: 14,
+    alignItems: 'center',
+  },
   sendBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
 });
