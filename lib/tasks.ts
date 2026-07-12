@@ -3,13 +3,19 @@ import { format, parseISO, isToday, isTomorrow, isPast } from 'date-fns';
 export type TaskRow = {
   id: string;
   title: string;
+  description: string | null;
   due_date: string | null;
   due_time: string | null;
   task_type: string | null;
   status: string | null;
+  visibility: string | null;
   related_id: string | null;
   related_name: string | null;
   assigned_to_id: string | null;
+  assigned_to_name: string | null;
+  assigned_by_id: string | null;
+  assigned_by_name: string | null;
+  created_at?: string | null;
 };
 
 /** Combine separate date + time columns into one Date for display/filtering. */
