@@ -6,8 +6,10 @@ import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeScreenHeader } from '../components/SafeScreenHeader';
 import { CrmAvatar } from '../components/CrmAvatar';
-import { useCrmSession, getUserDisplayName } from '../hooks/useCrmSession';
+import { LeaveRequestModal } from '../components/LeaveRequestModal';
+import { useCrmSession, getUserDisplayName, type CrmUser } from '../hooks/useCrmSession';
 import { signOut } from '../lib/auth';
+import { supabase } from '../lib/supabase';
 import {
   fetchAgentMtdStatsForProfile,
   formatTalkTimeHms,
@@ -26,6 +28,57 @@ const THEME = {
   text: '#1a1a1a',
 };
 
+type ProfileLeaveStats = {
+  approvedLeaveDays: number;
+  lateLoginCount: number;
+};
+
+const EMPTY_LEAVE_STATS: ProfileLeaveStats = {
+  approvedLeaveDays: 0,
+  lateLoginCount: 0,
+};
+
+async function fetchProfileLeaveStats(user: CrmUser): Promise<ProfileLeaveStats> {
+  try {
+    const displayName = getUserDisplayName(user).trim();
+
+    const [leavesRes, attendanceRes] = await Promise.all([
+      supabase
+        .from('leaves')
+        .select('days')
+        .eq('employee_id', user.id)
+        .eq('status', 'Approved'),
+      displayName
+        ? supabase
+          .from('attendance')
+          .select('id')
+          .ilike('employee_name', displayName)
+          .gt('check_in', '10:00:00')
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+
+    if (leavesRes.error) {
+      console.warn('[profile] leave stats', leavesRes.error.message);
+    }
+    if (attendanceRes.error) {
+      console.warn('[profile] late login stats', attendanceRes.error.message);
+    }
+
+    const approvedLeaveDays = (leavesRes.data ?? []).reduce((sum: number, row: { days: number | null }) => {
+      const days = Number(row.days);
+      return sum + (Number.isFinite(days) ? days : 0);
+    }, 0);
+
+    return {
+      approvedLeaveDays,
+      lateLoginCount: (attendanceRes.data ?? []).length,
+    };
+  } catch (e) {
+    console.warn('[profile] leave stats unexpected', e);
+    return EMPTY_LEAVE_STATS;
+  }
+}
+
 function StatRow({ label, value }: { label: string; value: string }) {
   return (
     <View style={s.statRow}>
@@ -39,19 +92,26 @@ export default function ProfileScreen() {
   const { user, loading: sessionLoading } = useCrmSession();
   const [profile, setProfile] = useState<CrmUserProfile | null>(null);
   const [stats, setStats] = useState<AgentMtdStats | null>(null);
+  const [leaveStats, setLeaveStats] = useState<ProfileLeaveStats>(EMPTY_LEAVE_STATS);
   const [loading, setLoading] = useState(true);
+  const [leaveModal, setLeaveModal] = useState(false);
 
   const loadProfile = useCallback(async () => {
     if (!user) {
       setProfile(null);
       setStats(null);
+      setLeaveStats(EMPTY_LEAVE_STATS);
       setLoading(false);
       return;
     }
     try {
-      const result = await fetchAgentMtdStatsForProfile(user);
+      const [result, nextLeaveStats] = await Promise.all([
+        fetchAgentMtdStatsForProfile(user),
+        fetchProfileLeaveStats(user),
+      ]);
       setProfile(result.profile);
       setStats(result.stats);
+      setLeaveStats(nextLeaveStats);
     } catch (e) {
       console.log('[profile] load error', e);
     } finally {
@@ -124,11 +184,37 @@ export default function ProfileScreen() {
           <StatRow label="Closings" value={String(Math.round(stats?.closings ?? 0))} />
         </View>
 
+        <Text style={s.sectionTitle}>LEAVE & ATTENDANCE</Text>
+        <View style={s.infoCard}>
+          <TouchableOpacity style={s.applyLeaveBtn} onPress={() => setLeaveModal(true)}>
+            <Ionicons name="add" size={16} color="#fff" />
+            <Text style={s.applyLeaveText}>Apply Leave</Text>
+          </TouchableOpacity>
+          <StatRow
+            label="Approved leave (days)"
+            value={String(Math.round(leaveStats.approvedLeaveDays))}
+          />
+          <StatRow
+            label="Late logins (est.)"
+            value={String(Math.round(leaveStats.lateLoginCount))}
+          />
+          <Text style={s.lateCaption}>Estimated from attendance name match</Text>
+        </View>
+
         <TouchableOpacity style={s.logoutBtn} onPress={handleLogout}>
           <Ionicons name="log-out-outline" size={18} color={THEME.red} />
           <Text style={s.logoutText}>Log out</Text>
         </TouchableOpacity>
       </ScrollView>
+
+      <LeaveRequestModal
+        visible={leaveModal}
+        user={user}
+        onClose={() => setLeaveModal(false)}
+        onSubmitted={async () => {
+          if (user) setLeaveStats(await fetchProfileLeaveStats(user));
+        }}
+      />
     </View>
   );
 }
@@ -197,6 +283,17 @@ const s = StyleSheet.create({
   },
   statLabel: { fontSize: 13, color: THEME.label, fontWeight: '600' },
   statValue: { fontSize: 15, fontWeight: '700', color: THEME.text },
+  applyLeaveBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: THEME.red,
+    borderRadius: 12,
+    paddingVertical: 12,
+  },
+  applyLeaveText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  lateCaption: { fontSize: 11, color: THEME.label, marginTop: -4 },
   logoutBtn: {
     marginTop: 8,
     flexDirection: 'row',
