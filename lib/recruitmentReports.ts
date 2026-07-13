@@ -96,7 +96,8 @@ export async function fetchRecruitmentReport(
 
     let candidatesQuery = supabase
       .from('recruitment')
-      .select('id, candidate_name, call_status, interview_date, assigned_recruiter_id, created_at');
+      .select('id, candidate_name, call_status, interview_date, assigned_recruiter_id, created_at')
+      .is('deleted_at', null);
 
     if (isRecruiter && user?.id) {
       candidatesQuery = candidatesQuery.eq('assigned_recruiter_id', user.id);

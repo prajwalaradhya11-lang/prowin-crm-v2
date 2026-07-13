@@ -237,6 +237,7 @@ export default function RecruitmentScreen() {
     let query = supabase
       .from('recruitment')
       .select(RECRUITMENT_SELECT_COLUMNS)
+      .is('deleted_at', null)
       .order('created_at', { ascending: false });
 
     if (isRecruiterRole(role) && user?.id) {
