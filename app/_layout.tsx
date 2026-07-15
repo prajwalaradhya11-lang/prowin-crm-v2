@@ -52,6 +52,10 @@ export default function RootLayout() {
           options={{ presentation: 'card', animation: 'slide_from_right' }}
         />
         <Stack.Screen
+          name="ai-assistant"
+          options={{ presentation: 'card', animation: 'slide_from_right' }}
+        />
+        <Stack.Screen
           name="voicenote"
           options={{ presentation: 'modal', animation: 'slide_from_bottom' }}
         />

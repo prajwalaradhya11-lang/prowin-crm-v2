@@ -89,12 +89,13 @@ function StatRow({ label, value }: { label: string; value: string }) {
 }
 
 export default function ProfileScreen() {
-  const { user, loading: sessionLoading } = useCrmSession();
+  const { user, role, loading: sessionLoading } = useCrmSession();
   const [profile, setProfile] = useState<CrmUserProfile | null>(null);
   const [stats, setStats] = useState<AgentMtdStats | null>(null);
   const [leaveStats, setLeaveStats] = useState<ProfileLeaveStats>(EMPTY_LEAVE_STATS);
   const [loading, setLoading] = useState(true);
   const [leaveModal, setLeaveModal] = useState(false);
+  const isSuperAdmin = role === 'super_admin';
 
   const loadProfile = useCallback(async () => {
     if (!user) {
@@ -201,6 +202,18 @@ export default function ProfileScreen() {
           <Text style={s.lateCaption}>Estimated from attendance name match</Text>
         </View>
 
+        {isSuperAdmin ? (
+          <TouchableOpacity
+            style={s.aiBtn}
+            onPress={() => router.push('/ai-assistant')}
+            accessibilityLabel="Open AI Assistant"
+          >
+            <Ionicons name="sparkles-outline" size={18} color={THEME.red} />
+            <Text style={s.aiBtnText}>AI Assistant</Text>
+            <Ionicons name="chevron-forward" size={16} color={THEME.red} />
+          </TouchableOpacity>
+        ) : null}
+
         <TouchableOpacity style={s.logoutBtn} onPress={handleLogout}>
           <Ionicons name="log-out-outline" size={18} color={THEME.red} />
           <Text style={s.logoutText}>Log out</Text>
@@ -294,6 +307,19 @@ const s = StyleSheet.create({
   },
   applyLeaveText: { color: '#fff', fontSize: 14, fontWeight: '700' },
   lateCaption: { fontSize: 11, color: THEME.label, marginTop: -4 },
+  aiBtn: {
+    marginTop: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 0.5,
+    borderColor: '#f5d0cc',
+    backgroundColor: '#fdf2f1',
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+  },
+  aiBtnText: { flex: 1, fontSize: 14, fontWeight: '700', color: THEME.red },
   logoutBtn: {
     marginTop: 8,
     flexDirection: 'row',

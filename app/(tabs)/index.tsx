@@ -163,10 +163,11 @@ function ChampionMini({
 }
 
 export default function DashboardScreen() {
-  const { user, loading: sessionLoading } = useCrmSession();
+  const { user, role, loading: sessionLoading } = useCrmSession();
   const [data, setData] = useState<HomeDashboardData>(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const isSuperAdmin = role === 'super_admin';
 
   const displayName = user ? getUserDisplayName(user) : 'Agent';
   const firstName = getFirstName(data.profile?.name ?? displayName);
@@ -251,6 +252,18 @@ export default function DashboardScreen() {
           <Text style={s.clockText}>Clock in / Check attendance</Text>
           <Ionicons name="chevron-forward" size={16} color={HOME.red} />
         </TouchableOpacity>
+
+        {isSuperAdmin ? (
+          <TouchableOpacity
+            style={s.aiBanner}
+            onPress={() => router.push('/ai-assistant')}
+            accessibilityLabel="Open AI Assistant"
+          >
+            <Ionicons name="sparkles-outline" size={20} color={HOME.red} />
+            <Text style={s.clockText}>AI Assistant</Text>
+            <Ionicons name="chevron-forward" size={16} color={HOME.red} />
+          </TouchableOpacity>
+        ) : null}
 
         <HomeCard title="CALLS · THIS MONTH" accentColor={HOME.blue}>
           <View style={s.metricsRow}>
@@ -339,6 +352,17 @@ const s = StyleSheet.create({
   liveRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, marginBottom: 10 },
   liveDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: HOME.green },
   liveText: { fontSize: 11, color: HOME.label },
+  aiBanner: {
+    backgroundColor: '#fdf2f1',
+    borderWidth: 0.5,
+    borderColor: '#f5d0cc',
+    borderRadius: 12,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
   clockBanner: {
     backgroundColor: '#fdf2f1',
     borderWidth: 0.5,
