@@ -23,6 +23,7 @@ import { SafeScreenHeader } from '../../components/SafeScreenHeader';
 import { useCrmSession, getUserDisplayName } from '../../hooks/useCrmSession';
 import { THEME } from '../../lib/prowinTheme';
 import { findRecentOutgoingCall, requestCallLogPermission } from '../../lib/androidCallLog';
+import { digitsOnly } from '../../lib/coldCallContact';
 
 const RECRUITMENT_SELECT_COLUMNS =
   'id,candidate_name,source,position_applied,phone,email,interview_status,offer_status,joining_status,notes,cv_url,assigned_recruiter_id,assigned_recruiter_name,added_by_id,added_by_name,call_status,follow_up_date,created_at';
@@ -408,6 +409,12 @@ export default function RecruitmentCandidateDetailScreen() {
     }
   }, [callActive, candidate?.phone, clearCallTimer]);
 
+  const handleWhatsApp = useCallback(() => {
+    const d = digitsOnly(candidate?.phone);
+    if (!d || d.length < 8) return;
+    void Linking.openURL(`https://wa.me/${d}`);
+  }, [candidate?.phone]);
+
   const handleEndCallPress = useCallback(() => {
     if (!callActive || !callStartedAtRef.current) return;
     void openCallLogSheet();
@@ -507,6 +514,8 @@ export default function RecruitmentCandidateDetailScreen() {
 
   const modalMaxHeight = Dimensions.get('window').height * 0.55;
   const currentStatus = candidate?.call_status?.trim() || 'New';
+  const whatsappDigits = digitsOnly(candidate?.phone);
+  const canWhatsApp = Boolean(whatsappDigits && whatsappDigits.length >= 8);
 
   if (loading) {
     return (
@@ -630,13 +639,21 @@ export default function RecruitmentCandidateDetailScreen() {
                   : 'Start a timed call to log duration and result.'}
               </Text>
             )}
-            <TouchableOpacity
-              style={[s.callBtn, callActive && s.endCallBtn]}
-              onPress={callActive ? handleEndCallPress : handleStartCall}
-            >
-              <Ionicons name={callActive ? 'stop-circle-outline' : 'call-outline'} size={18} color="#fff" />
-              <Text style={s.callBtnText}>{callActive ? 'End Call' : 'Call'}</Text>
-            </TouchableOpacity>
+            <View style={s.callActions}>
+              <TouchableOpacity
+                style={[s.callBtn, callActive && s.endCallBtn]}
+                onPress={callActive ? handleEndCallPress : handleStartCall}
+              >
+                <Ionicons name={callActive ? 'stop-circle-outline' : 'call-outline'} size={18} color="#fff" />
+                <Text style={s.callBtnText}>{callActive ? 'End Call' : 'Call'}</Text>
+              </TouchableOpacity>
+              {canWhatsApp ? (
+                <TouchableOpacity style={s.whatsAppBtn} onPress={handleWhatsApp}>
+                  <Ionicons name="logo-whatsapp" size={18} color="#15803d" />
+                  <Text style={s.whatsAppBtnText}>WhatsApp</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
           </View>
         </View>
 
@@ -845,7 +862,9 @@ const s = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
   callHint: { fontSize: 13, color: COLORS.muted, textAlign: 'center' },
+  callActions: { flexDirection: 'row', alignItems: 'stretch', gap: 8 },
   callBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -856,6 +875,19 @@ const s = StyleSheet.create({
   },
   endCallBtn: { backgroundColor: COLORS.red },
   callBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  whatsAppBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: COLORS.greenLight,
+    borderWidth: 1,
+    borderColor: COLORS.greenBorder,
+    borderRadius: 10,
+    paddingVertical: 13,
+  },
+  whatsAppBtnText: { color: '#15803d', fontSize: 14, fontWeight: '700' },
   emptyHistory: { fontSize: 13, color: COLORS.muted, fontStyle: 'italic' },
   logRow: {
     backgroundColor: COLORS.white,
