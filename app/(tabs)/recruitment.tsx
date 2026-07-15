@@ -25,7 +25,7 @@ import { useCrmSession, getUserDisplayName, type CrmUser } from '../../hooks/use
 import { THEME } from '../../lib/prowinTheme';
 
 const RECRUITMENT_SELECT_COLUMNS =
-  'id,candidate_name,source,position_applied,phone,email,interview_status,offer_status,joining_status,notes,cv_url,assigned_recruiter_id,assigned_recruiter_name,call_status,follow_up_date,created_at';
+  'id,candidate_name,source,position_applied,phone,email,interview_status,offer_status,joining_status,notes,cv_url,assigned_recruiter_id,assigned_recruiter_name,added_by_id,added_by_name,call_status,follow_up_date,created_at';
 
 const STATUS_FILTER_OPTIONS = [
   'All',
@@ -36,6 +36,8 @@ const STATUS_FILTER_OPTIONS = [
   'Hired',
   'Rejected',
 ] as const;
+
+type CreatedDatePreset = 'all' | 'today' | 'last7' | 'last30' | 'thisMonth' | 'custom';
 
 type RecruitmentCandidate = {
   id: string;
@@ -51,6 +53,8 @@ type RecruitmentCandidate = {
   cv_url: string | null;
   assigned_recruiter_id: string | null;
   assigned_recruiter_name: string | null;
+  added_by_id: string | null;
+  added_by_name: string | null;
   call_status: string | null;
   follow_up_date: string | null;
   created_at: string;
@@ -79,6 +83,10 @@ function trimOrNull(value: string): string | null {
   return trimmed || null;
 }
 
+function digitsOnly(value: string): string {
+  return value.replace(/\D/g, '');
+}
+
 function normalizeCallStatus(status: string | null | undefined): string {
   return status?.trim() || 'New';
 }
@@ -99,6 +107,97 @@ function canViewAllCandidates(role: string | null): boolean {
   return role === 'hr_manager' || role === 'admin' || role === 'super_admin';
 }
 
+function startOfLocalDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+}
+
+function endOfLocalDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+}
+
+function getCreatedAtFilterRange(
+  preset: CreatedDatePreset,
+  customFrom: string,
+  customTo: string,
+): { fromMs: number | null; toMs: number | null } {
+  const now = new Date();
+  const todayStart = startOfLocalDay(now);
+
+  if (preset === 'all') return { fromMs: null, toMs: null };
+  if (preset === 'today') {
+    return { fromMs: todayStart.getTime(), toMs: endOfLocalDay(now).getTime() };
+  }
+  if (preset === 'last7') {
+    const from = new Date(todayStart);
+    from.setDate(from.getDate() - 6);
+    return { fromMs: from.getTime(), toMs: endOfLocalDay(now).getTime() };
+  }
+  if (preset === 'last30') {
+    const from = new Date(todayStart);
+    from.setDate(from.getDate() - 29);
+    return { fromMs: from.getTime(), toMs: endOfLocalDay(now).getTime() };
+  }
+  if (preset === 'thisMonth') {
+    const from = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    return { fromMs: from.getTime(), toMs: endOfLocalDay(now).getTime() };
+  }
+
+  let fromMs: number | null = null;
+  let toMs: number | null = null;
+  if (customFrom.trim()) {
+    const parsed = new Date(`${customFrom.trim()}T00:00:00`);
+    if (!Number.isNaN(parsed.getTime())) fromMs = startOfLocalDay(parsed).getTime();
+  }
+  if (customTo.trim()) {
+    const parsed = new Date(`${customTo.trim()}T00:00:00`);
+    if (!Number.isNaN(parsed.getTime())) toMs = endOfLocalDay(parsed).getTime();
+  }
+  return { fromMs, toMs };
+}
+
+function candidateMatchesSearch(candidate: RecruitmentCandidate, rawQuery: string): boolean {
+  const query = rawQuery.trim();
+  if (!query) return true;
+
+  const lower = query.toLowerCase();
+  if ((candidate.candidate_name ?? '').toLowerCase().includes(lower)) return true;
+  if ((candidate.email ?? '').toLowerCase().includes(lower)) return true;
+  if ((candidate.position_applied ?? '').toLowerCase().includes(lower)) return true;
+
+  const queryDigits = digitsOnly(query);
+  if (queryDigits) {
+    const phoneDigits = digitsOnly(candidate.phone ?? '');
+    if (phoneDigits.includes(queryDigits)) return true;
+  }
+  return false;
+}
+
+function candidateMatchesCreatedAt(
+  candidate: RecruitmentCandidate,
+  fromMs: number | null,
+  toMs: number | null,
+): boolean {
+  if (fromMs == null && toMs == null) return true;
+  if (!candidate.created_at) return false;
+  const createdMs = new Date(candidate.created_at).getTime();
+  if (Number.isNaN(createdMs)) return false;
+  if (fromMs != null && createdMs < fromMs) return false;
+  if (toMs != null && createdMs > toMs) return false;
+  return true;
+}
+
+function candidateMatchesAddedBy(
+  candidate: RecruitmentCandidate,
+  addedByFilter: string,
+): boolean {
+  if (addedByFilter === 'all') return true;
+  if (addedByFilter === 'unknown') {
+    return !candidate.added_by_id && !candidate.added_by_name?.trim();
+  }
+  if (candidate.added_by_id) return candidate.added_by_id === addedByFilter;
+  return (candidate.added_by_name ?? '').trim() === addedByFilter;
+}
+
 function buildRecruitmentInsertPayload(
   form: AddCandidateForm,
   role: string | null,
@@ -111,6 +210,11 @@ function buildRecruitmentInsertPayload(
     assigned_recruiter_id = user.id;
     assigned_recruiter_name = getUserDisplayName(user);
   }
+
+  const added_by_id = user?.id ?? null;
+  const added_by_name = user
+    ? (user.name?.trim() || user.email || 'User')
+    : null;
 
   return {
     candidate_name: form.candidateName.trim() || 'candidate',
@@ -128,6 +232,8 @@ function buildRecruitmentInsertPayload(
     follow_up_date: null,
     assigned_recruiter_id,
     assigned_recruiter_name,
+    added_by_id,
+    added_by_name,
   };
 }
 
@@ -156,6 +262,7 @@ function CandidateCard({
   const subtitleParts = [candidate.position_applied, candidate.source].filter(Boolean);
   const subtitle = subtitleParts.join(' · ');
   const callStatus = getCallStatusPillStyle(candidate.call_status);
+  const addedBy = candidate.added_by_name?.trim();
 
   return (
     <Pressable
@@ -175,6 +282,11 @@ function CandidateCard({
           {candidate.phone ? (
             <Text style={s.cardPhone} numberOfLines={1}>
               {candidate.phone}
+            </Text>
+          ) : null}
+          {addedBy ? (
+            <Text style={s.cardAddedBy} numberOfLines={1}>
+              Added by: {addedBy}
             </Text>
           ) : null}
         </View>
@@ -198,13 +310,28 @@ export default function RecruitmentScreen() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [activeTabIndex, setActiveTabIndex] = useState(0);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [createdPreset, setCreatedPreset] = useState<CreatedDatePreset>('all');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [addedByFilter, setAddedByFilter] = useState('all');
+
+  const baseFiltered = useMemo(() => {
+    const createdRange = getCreatedAtFilterRange(createdPreset, customFrom, customTo);
+    return candidates.filter((candidate) => {
+      if (!candidateMatchesSearch(candidate, searchQuery)) return false;
+      if (!candidateMatchesCreatedAt(candidate, createdRange.fromMs, createdRange.toMs)) return false;
+      if (!candidateMatchesAddedBy(candidate, addedByFilter)) return false;
+      return true;
+    });
+  }, [addedByFilter, candidates, createdPreset, customFrom, customTo, searchQuery]);
 
   const candidatesByTab = useMemo(
     () =>
       STATUS_FILTER_OPTIONS.map((filter) =>
-        candidates.filter((candidate) => candidateMatchesStatusFilter(candidate, filter)),
+        baseFiltered.filter((candidate) => candidateMatchesStatusFilter(candidate, filter)),
       ),
-    [candidates],
+    [baseFiltered],
   );
 
   const tabs = useMemo(
@@ -216,6 +343,22 @@ export default function RecruitmentScreen() {
       })),
     [candidatesByTab],
   );
+
+  const addedByFilterOptions = useMemo(() => {
+    const byKey = new Map<string, string>();
+    for (const candidate of candidates) {
+      if (candidate.added_by_id) {
+        const label = candidate.added_by_name?.trim() || candidate.added_by_id;
+        if (!byKey.has(candidate.added_by_id)) byKey.set(candidate.added_by_id, label);
+      } else if (candidate.added_by_name?.trim()) {
+        const name = candidate.added_by_name.trim();
+        if (!byKey.has(name)) byKey.set(name, name);
+      }
+    }
+    return Array.from(byKey.entries())
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [candidates]);
 
   const handleTabIndexChange = useCallback((index: number) => {
     setActiveTabIndex(index);
@@ -365,6 +508,113 @@ export default function RecruitmentScreen() {
       />
       <PageTitle label="Recruitment" title="Candidates" />
 
+      {!showLoading && (
+        <View style={s.filterBar}>
+          <TextInput
+            style={s.searchInput}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search name, phone, email, role…"
+            placeholderTextColor={COLORS.muted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            clearButtonMode="while-editing"
+          />
+
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={s.filterChipsRow}
+          >
+            <View style={s.filterChip}>
+              <Text style={s.filterChipLabel}>Created</Text>
+              <View style={s.filterSelectWrap}>
+                {([
+                  ['all', 'All time'],
+                  ['today', 'Today'],
+                  ['last7', 'Last 7 days'],
+                  ['last30', 'Last 30 days'],
+                  ['thisMonth', 'This month'],
+                  ['custom', 'Custom'],
+                ] as const).map(([value, label]) => {
+                  const active = createdPreset === value;
+                  return (
+                    <TouchableOpacity
+                      key={value}
+                      style={[s.presetChip, active && s.presetChipOn]}
+                      onPress={() => setCreatedPreset(value)}
+                    >
+                      <Text style={[s.presetChipText, active && s.presetChipTextOn]}>{label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+          </ScrollView>
+
+          {createdPreset === 'custom' && (
+            <View style={s.customDateRow}>
+              <View style={s.customDateField}>
+                <Text style={s.filterChipLabel}>From</Text>
+                <TextInput
+                  style={s.dateInput}
+                  value={customFrom}
+                  onChangeText={setCustomFrom}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor={COLORS.muted}
+                  autoCapitalize="none"
+                />
+              </View>
+              <View style={s.customDateField}>
+                <Text style={s.filterChipLabel}>To</Text>
+                <TextInput
+                  style={s.dateInput}
+                  value={customTo}
+                  onChangeText={setCustomTo}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor={COLORS.muted}
+                  autoCapitalize="none"
+                />
+              </View>
+            </View>
+          )}
+
+          <View style={s.addedByRow}>
+            <Text style={s.filterChipLabel}>Added by</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.filterSelectWrap}>
+              <TouchableOpacity
+                style={[s.presetChip, addedByFilter === 'all' && s.presetChipOn]}
+                onPress={() => setAddedByFilter('all')}
+              >
+                <Text style={[s.presetChipText, addedByFilter === 'all' && s.presetChipTextOn]}>All</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.presetChip, addedByFilter === 'unknown' && s.presetChipOn]}
+                onPress={() => setAddedByFilter('unknown')}
+              >
+                <Text style={[s.presetChipText, addedByFilter === 'unknown' && s.presetChipTextOn]}>
+                  Unknown
+                </Text>
+              </TouchableOpacity>
+              {addedByFilterOptions.map((option) => {
+                const active = addedByFilter === option.value;
+                return (
+                  <TouchableOpacity
+                    key={option.value}
+                    style={[s.presetChip, active && s.presetChipOn]}
+                    onPress={() => setAddedByFilter(option.value)}
+                  >
+                    <Text style={[s.presetChipText, active && s.presetChipTextOn]} numberOfLines={1}>
+                      {option.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        </View>
+      )}
+
       {showLoading ? (
         <ActivityIndicator color={COLORS.red} style={s.loader} />
       ) : (
@@ -513,6 +763,56 @@ const s = StyleSheet.create({
   cardName: { fontSize: 14, fontWeight: '800', color: THEME.heading },
   cardSubtitle: { fontSize: 12, color: THEME.meta, marginTop: 3 },
   cardPhone: { fontSize: 12, fontWeight: '600', color: COLORS.red, marginTop: 4 },
+  cardAddedBy: { fontSize: 11, color: THEME.meta, marginTop: 4 },
+  filterBar: {
+    paddingHorizontal: 14,
+    paddingBottom: 8,
+    gap: 8,
+  },
+  searchInput: {
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === 'ios' ? 11 : 8,
+    fontSize: 14,
+    color: COLORS.text,
+  },
+  filterChipsRow: { gap: 6, alignItems: 'center', paddingRight: 8 },
+  filterChip: { gap: 4 },
+  filterChipLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.muted,
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
+  filterSelectWrap: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  presetChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.white,
+  },
+  presetChipOn: { backgroundColor: COLORS.red, borderColor: COLORS.red },
+  presetChipText: { fontSize: 11, fontWeight: '600', color: COLORS.text },
+  presetChipTextOn: { color: '#fff' },
+  customDateRow: { flexDirection: 'row', gap: 8 },
+  customDateField: { flex: 1, gap: 4 },
+  dateInput: {
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: Platform.OS === 'ios' ? 10 : 8,
+    fontSize: 13,
+    color: COLORS.text,
+  },
+  addedByRow: { gap: 4 },
   statusPill: {
     paddingHorizontal: 8,
     paddingVertical: 4,

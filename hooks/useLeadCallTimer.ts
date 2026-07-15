@@ -1,11 +1,29 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { AppState, AppStateStatus, Linking } from 'react-native';
+import { AppState, AppStateStatus, Linking, Platform } from 'react-native';
 
-type PendingCall = { bgStart: number | null };
+import {
+  requestCallLogPermission,
+  resolveAfterOutgoingCall,
+  type CallDurationSource,
+} from '../lib/androidCallLog';
 
-export function useLeadCallTimer(onCallEnded: (durationSeconds: number) => void) {
+export type LeadCallEndedResult = {
+  durationSeconds: number;
+  source: CallDurationSource;
+};
+
+type PendingCall = {
+  phone: string;
+  startedAtMs: number;
+  bgStart: number | null;
+};
+
+export function useLeadCallTimer(onCallEnded: (result: LeadCallEndedResult) => void) {
   const pendingRef = useRef<PendingCall | null>(null);
+  const resolvingRef = useRef(false);
   const appStateRef = useRef(AppState.currentState);
+  const onCallEndedRef = useRef(onCallEnded);
+  onCallEndedRef.current = onCallEnded;
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
@@ -20,20 +38,53 @@ export function useLeadCallTimer(onCallEnded: (durationSeconds: number) => void)
         prev.match(/inactive|background/)
         && nextState === 'active'
         && pendingRef.current?.bgStart
+        && !resolvingRef.current
       ) {
-        const elapsedMs = Date.now() - pendingRef.current.bgStart;
-        const durationSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+        const pending = pendingRef.current;
         pendingRef.current = null;
-        onCallEnded(durationSeconds);
+        resolvingRef.current = true;
+
+        const elapsedMs = Date.now() - (pending.bgStart ?? Date.now());
+        const timerFallbackSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+
+        void (async () => {
+          try {
+            const resolved = await resolveAfterOutgoingCall({
+              phone: pending.phone,
+              startedAtMs: pending.startedAtMs,
+              timerFallbackSeconds,
+            });
+            onCallEndedRef.current(resolved);
+          } catch (error) {
+            console.warn('[useLeadCallTimer] resolve failed', error);
+            onCallEndedRef.current({
+              durationSeconds: timerFallbackSeconds,
+              source: 'timer',
+            });
+          } finally {
+            resolvingRef.current = false;
+          }
+        })();
       }
     });
     return () => sub.remove();
-  }, [onCallEnded]);
+  }, []);
 
   const startLeadCall = useCallback((phone: string | null | undefined) => {
     if (!phone?.trim()) return;
-    pendingRef.current = { bgStart: null };
-    Linking.openURL(`tel:${phone.trim()}`);
+
+    const trimmed = phone.trim();
+    pendingRef.current = {
+      phone: trimmed,
+      startedAtMs: Date.now(),
+      bgStart: null,
+    };
+
+    if (Platform.OS === 'android') {
+      void requestCallLogPermission();
+    }
+
+    Linking.openURL(`tel:${trimmed}`);
   }, []);
 
   return { startLeadCall };

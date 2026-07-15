@@ -11,6 +11,7 @@ import { CALL_RESULT_OPTIONS, mapCallResultToContactStatus, saveColdCallLog } fr
 import { scheduleFollowUpReminder } from '../lib/notifications';
 import { getContactName } from '../lib/contactName';
 import { ColdCallContactListItem } from '../lib/coldCallContact';
+import type { CallDurationSource } from '../lib/androidCallLog';
 import { SafeScreenHeader } from './SafeScreenHeader';
 import { ContactNavRow } from './ContactNavRow';
 import { ActionButtons } from './ui';
@@ -20,7 +21,13 @@ type Props = {
   contact: ColdCallContactListItem | null;
   selectedAgentId: string | null;
   selectedAgentName: string;
+  /** When true after an auto-opened dial, duration is read-only. Manual open keeps false. */
   durationLocked?: boolean;
+  /** call_log = locked real seconds; timer = locked/fallback minutes; manual/undefined = editable minutes. */
+  durationSource?: CallDurationSource | 'manual' | null;
+  /** True seconds when durationSource === 'call_log' (do not round to minutes). */
+  lockedDurationSeconds?: number;
+  /** Minutes field for timer fallback / manual entry. */
   initialDurationMinutes?: string;
   hasPrev: boolean;
   hasNext: boolean;
@@ -33,12 +40,22 @@ type Props = {
   onEmail: (contact: ColdCallContactListItem) => void;
 };
 
+function formatLockedSeconds(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  if (mins <= 0) return `${secs}s`;
+  return `${mins}m ${secs}s`;
+}
+
 export function LogCallModal({
   visible,
   contact,
   selectedAgentId,
   selectedAgentName,
   durationLocked = false,
+  durationSource = null,
+  lockedDurationSeconds = 0,
   initialDurationMinutes = '0',
   hasPrev,
   hasNext,
@@ -58,6 +75,8 @@ export function LogCallModal({
   const [followUpAt, setFollowUpAt] = useState<Date | null>(null);
   const [showFollowUpPicker, setShowFollowUpPicker] = useState(false);
 
+  const useCallLogSeconds = durationLocked && durationSource === 'call_log';
+
   useEffect(() => {
     if (!visible || !contact) return;
     setCallResult(CALL_RESULT_OPTIONS[0]);
@@ -66,15 +85,21 @@ export function LogCallModal({
     setInterestLevel(null);
     setFollowUpAt(null);
     setShowFollowUpPicker(false);
-  }, [visible, contact?.id, initialDurationMinutes]);
+  }, [visible, contact?.id, initialDurationMinutes, durationSource, lockedDurationSeconds]);
 
   async function handleSave() {
     if (!contact || !selectedAgentId) {
       Alert.alert('Select a contact');
       return;
     }
-    const mins = parseInt(durationMinutes, 10);
-    const durationSeconds = Number.isFinite(mins) && mins >= 0 ? mins * 60 : 0;
+
+    const durationSeconds = useCallLogSeconds
+      ? Math.max(0, Math.round(lockedDurationSeconds))
+      : (() => {
+          const mins = parseInt(durationMinutes, 10);
+          return Number.isFinite(mins) && mins >= 0 ? mins * 60 : 0;
+        })();
+
     const contactStatus = mapCallResultToContactStatus(callResult);
     const followUpDateIso = followUpAt ? format(followUpAt, 'yyyy-MM-dd') : null;
 
@@ -162,18 +187,38 @@ export function LogCallModal({
             ))}
           </ScrollView>
 
-          <Text style={s.fieldLabel}>TALK TIME (MINUTES)</Text>
-          <TextInput
-            style={[s.input, durationLocked && s.inputLocked]}
-            keyboardType="number-pad"
-            placeholder="0"
-            placeholderTextColor={COLORS.muted}
-            value={durationMinutes}
-            onChangeText={durationLocked ? undefined : setDurationMinutes}
-            editable={!durationLocked}
-          />
-          {durationLocked && (
-            <Text style={s.lockedHint}>Auto-filled from call timer (read-only)</Text>
+          <Text style={s.fieldLabel}>TALK TIME</Text>
+          {useCallLogSeconds ? (
+            <View style={s.lockedDurationBox}>
+              <View style={s.lockedDurationRow}>
+                <Ionicons name="lock-closed" size={16} color={COLORS.green} />
+                <Text style={s.lockedDurationValue}>
+                  Call duration: {formatLockedSeconds(lockedDurationSeconds)}
+                </Text>
+              </View>
+              <Text style={s.lockedHintGreen}>From phone log — locked</Text>
+            </View>
+          ) : (
+            <>
+              <TextInput
+                style={[s.input, durationLocked && s.inputLocked]}
+                keyboardType="number-pad"
+                placeholder="0"
+                placeholderTextColor={COLORS.muted}
+                value={durationMinutes}
+                onChangeText={durationLocked ? undefined : setDurationMinutes}
+                editable={!durationLocked}
+              />
+              {durationLocked && durationSource === 'timer' ? (
+                <Text style={s.lockedHintAmber}>
+                  Couldn&apos;t read call duration from phone — using timer (minutes).
+                </Text>
+              ) : durationLocked ? (
+                <Text style={s.lockedHint}>Auto-filled from call timer (read-only)</Text>
+              ) : (
+                <Text style={s.lockedHint}>Enter talk time in minutes</Text>
+              )}
+            </>
           )}
 
           {callResult === 'Connected - Interested' && (
@@ -261,8 +306,8 @@ export function LogCallModal({
               <DateTimePicker
                 value={followUpAt ?? new Date()}
                 mode="datetime"
-                display="inline"
-                onChange={(_, date) => { if (date) setFollowUpAt(date); }}
+                display="spinner"
+                onChange={onFollowUpChange}
               />
             </View>
           </View>
@@ -274,48 +319,60 @@ export function LogCallModal({
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
-  body: { flex: 1, padding: 14 },
-  fieldLabel: { fontSize: 10, fontWeight: '700', color: COLORS.muted, letterSpacing: 0.5, marginBottom: 8 },
+  body: { flex: 1, padding: 16 },
+  fieldLabel: {
+    fontSize: 10, fontWeight: '700', color: COLORS.muted, letterSpacing: 0.6, marginBottom: 8,
+  },
   chip: {
-    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 20,
+    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20,
     borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white, marginRight: 8,
   },
   chipActive: { backgroundColor: COLORS.red, borderColor: COLORS.red },
-  chipText: { fontSize: 12, fontWeight: '600', color: COLORS.muted },
+  chipText: { fontSize: 12, fontWeight: '600', color: COLORS.text },
   chipTextActive: { color: '#fff' },
+  interestRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 4 },
   input: {
     backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.border,
-    borderRadius: 12, padding: 12, fontSize: 14, color: COLORS.text,
+    borderRadius: 10, paddingHorizontal: 12, paddingVertical: 11, fontSize: 14, color: COLORS.text,
   },
   inputLocked: { backgroundColor: COLORS.bg, color: COLORS.muted },
-  lockedHint: { fontSize: 10, color: COLORS.muted, marginTop: 4 },
-  notesInput: { minHeight: 100 },
-  interestRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 8 },
+  lockedHint: { marginTop: 6, fontSize: 11, color: COLORS.muted },
+  lockedHintAmber: { marginTop: 6, fontSize: 11, fontWeight: '600', color: COLORS.amber },
+  lockedHintGreen: { marginTop: 4, fontSize: 11, fontWeight: '700', color: COLORS.green },
+  lockedDurationBox: {
+    backgroundColor: '#e9f7ef',
+    borderWidth: 1,
+    borderColor: '#b7e4c9',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    gap: 4,
+  },
+  lockedDurationRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  lockedDurationValue: { fontSize: 14, fontWeight: '800', color: COLORS.text, flexShrink: 1 },
+  notesInput: { minHeight: 90, textAlignVertical: 'top' },
   followUpBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.border,
-    borderRadius: 12, padding: 12,
+    borderRadius: 10, paddingHorizontal: 12, paddingVertical: 12,
   },
   followUpText: { fontSize: 13, fontWeight: '600', color: COLORS.text },
-  clearFollowUp: { marginTop: 6, alignSelf: 'flex-start' },
-  clearFollowUpText: { fontSize: 11, fontWeight: '600', color: COLORS.red },
-  hintText: { fontSize: 11, color: COLORS.muted, marginTop: 12, marginBottom: 16 },
-  savingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, justifyContent: 'center', paddingVertical: 14 },
-  savingText: { fontSize: 14, color: COLORS.muted },
+  clearFollowUp: { marginTop: 8 },
+  clearFollowUpText: { fontSize: 12, fontWeight: '700', color: COLORS.red },
+  hintText: { marginTop: 14, fontSize: 12, color: COLORS.muted },
+  savingRow: { marginTop: 18, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  savingText: { fontSize: 13, color: COLORS.muted },
   saveBtn: {
-    backgroundColor: COLORS.red, borderRadius: 12, paddingVertical: 14,
+    marginTop: 18, backgroundColor: COLORS.red, borderRadius: 12, paddingVertical: 14,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
   },
-  saveBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  saveBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
   pickerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  pickerSheet: {
-    backgroundColor: COLORS.white, borderTopLeftRadius: 16, borderTopRightRadius: 16,
-    paddingBottom: 24,
-  },
+  pickerSheet: { backgroundColor: COLORS.white, borderTopLeftRadius: 16, borderTopRightRadius: 16, paddingBottom: 24 },
   pickerHeader: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8,
+    paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: COLORS.border,
   },
-  pickerTitle: { fontSize: 16, fontWeight: '800', color: COLORS.text },
-  pickerDone: { fontSize: 15, fontWeight: '700', color: COLORS.red },
+  pickerTitle: { fontSize: 15, fontWeight: '800', color: COLORS.text },
+  pickerDone: { fontSize: 14, fontWeight: '700', color: COLORS.red },
 });

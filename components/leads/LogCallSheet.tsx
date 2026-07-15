@@ -28,6 +28,7 @@ import {
   statusRequiresFollowUp,
 } from '../../lib/leadLogCallSheet';
 import { saveLeadSheetUpdate, prefetchStatusFromOutcome } from '../../lib/leadSheetSave';
+import type { CallDurationSource } from '../../lib/androidCallLog';
 
 export type LogCallSheetMode = 'log-call' | 'change-status';
 
@@ -54,6 +55,8 @@ type LogCallSheetProps = {
   mode: LogCallSheetMode;
   lead: LeadForSheet | null;
   durationSeconds?: number;
+  /** call_log = locked from phone; timer = dial fallback; manual = user opened log without dial. */
+  durationSource?: CallDurationSource | 'manual';
   doneBy: string;
   agentId: string | null;
   agentName: string;
@@ -79,6 +82,7 @@ export function LogCallSheet({
   mode,
   lead,
   durationSeconds = 0,
+  durationSource = 'manual',
   doneBy,
   agentId,
   agentName,
@@ -244,7 +248,26 @@ export function LogCallSheet({
                   <Text style={s.summaryName}>{displayName}</Text>
                   {lead.phone ? <Text style={s.summaryPhone}>{lead.phone}</Text> : null}
                 </View>
-                <Text style={s.summaryDuration}>{formatTalkDuration(durationSeconds)}</Text>
+                <View style={s.durationCol}>
+                  {durationSource === 'call_log' ? (
+                    <>
+                      <View style={s.durationLockedRow}>
+                        <Ionicons name="lock-closed" size={14} color={THEME.green} />
+                        <Text style={s.summaryDurationLocked}>{formatTalkDuration(durationSeconds)}</Text>
+                      </View>
+                      <Text style={s.durationSourceLocked}>From phone log — locked</Text>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={s.summaryDuration}>{formatTalkDuration(durationSeconds)}</Text>
+                      {durationSource === 'timer' ? (
+                        <Text style={s.durationSourceFallback}>
+                          Couldn&apos;t read call duration — using timer.
+                        </Text>
+                      ) : null}
+                    </>
+                  )}
+                </View>
               </View>
             )}
 
@@ -531,6 +554,11 @@ const s = StyleSheet.create({
   summaryName: { fontSize: 15, fontWeight: '800', color: THEME.heading },
   summaryPhone: { fontSize: 12, color: THEME.red, marginTop: 2 },
   summaryDuration: { fontSize: 13, fontWeight: '700', color: THEME.green },
+  durationCol: { alignItems: 'flex-end', maxWidth: '46%', gap: 2 },
+  durationLockedRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  summaryDurationLocked: { fontSize: 13, fontWeight: '800', color: THEME.green },
+  durationSourceLocked: { fontSize: 10, fontWeight: '600', color: THEME.green, textAlign: 'right' },
+  durationSourceFallback: { fontSize: 10, fontWeight: '600', color: THEME.amber, textAlign: 'right' },
   sectionLabel: {
     fontSize: 10,
     fontWeight: '700',

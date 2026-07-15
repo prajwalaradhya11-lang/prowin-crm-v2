@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet,
-  ActivityIndicator, Linking, AppState, AppStateStatus,
+  ActivityIndicator, Linking, AppState, AppStateStatus, Platform,
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { format } from 'date-fns';
@@ -17,6 +17,11 @@ import {
   getAdjacentContactId, getColdCallNavIds, getContactNavIndex,
 } from '../../lib/coldCallNav';
 import { useSwipeEntityNav } from '../../hooks/useSwipeEntityNav';
+import {
+  requestCallLogPermission,
+  resolveAfterOutgoingCall,
+  type CallDurationSource,
+} from '../../lib/androidCallLog';
 
 function Field({ label, value }: { label: string; value: string | null | undefined }) {
   return (
@@ -33,9 +38,17 @@ export default function ColdCallContactDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [logModal, setLogModal] = useState(false);
   const [durationLocked, setDurationLocked] = useState(false);
+  const [durationSource, setDurationSource] = useState<CallDurationSource | 'manual' | null>(null);
+  const [lockedDurationSeconds, setLockedDurationSeconds] = useState(0);
   const [initialDuration, setInitialDuration] = useState('0');
 
-  const pendingCallRef = useRef<{ contactId: string; bgStart: number | null } | null>(null);
+  const pendingCallRef = useRef<{
+    contactId: string;
+    phone: string;
+    startedAtMs: number;
+    bgStart: number | null;
+  } | null>(null);
+  const resolvingCallRef = useRef(false);
   const appStateRef = useRef(AppState.currentState);
 
   const loadContact = useCallback(async (contactId: string) => {
@@ -63,13 +76,50 @@ export default function ColdCallContactDetailScreen() {
         pendingCallRef.current.bgStart = Date.now();
       }
 
-      if (prev.match(/inactive|background/) && nextState === 'active' && pendingCallRef.current?.bgStart) {
-        const elapsedMs = Date.now() - pendingCallRef.current.bgStart;
-        const mins = Math.max(0, Math.round(elapsedMs / 60000));
+      if (
+        prev.match(/inactive|background/)
+        && nextState === 'active'
+        && pendingCallRef.current?.bgStart
+        && !resolvingCallRef.current
+      ) {
+        const pending = pendingCallRef.current;
         pendingCallRef.current = null;
-        setInitialDuration(String(mins));
-        setDurationLocked(true);
-        setLogModal(true);
+        resolvingCallRef.current = true;
+
+        const elapsedMs = Date.now() - (pending.bgStart ?? Date.now());
+        const timerFallbackSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+        const mins = Math.max(0, Math.round(elapsedMs / 60000));
+
+        void (async () => {
+          try {
+            const resolved = await resolveAfterOutgoingCall({
+              phone: pending.phone,
+              startedAtMs: pending.startedAtMs,
+              timerFallbackSeconds,
+            });
+
+            if (resolved.source === 'call_log') {
+              setLockedDurationSeconds(resolved.durationSeconds);
+              setDurationSource('call_log');
+              setInitialDuration('0');
+            } else {
+              setLockedDurationSeconds(0);
+              setDurationSource('timer');
+              setInitialDuration(String(mins));
+            }
+            setDurationLocked(true);
+            setLogModal(true);
+          } catch (error) {
+            console.warn('[coldcall detail] resolve duration failed', error);
+            setLockedDurationSeconds(0);
+            setDurationSource('timer');
+            setInitialDuration(String(mins));
+            setDurationLocked(true);
+            setLogModal(true);
+          } finally {
+            resolvingCallRef.current = false;
+          }
+        })();
       }
     });
     return () => sub.remove();
@@ -83,6 +133,8 @@ export default function ColdCallContactDetailScreen() {
   const handlePrev = useCallback(() => {
     if (!id) return;
     setDurationLocked(false);
+    setDurationSource(null);
+    setLockedDurationSeconds(0);
     setInitialDuration('0');
     navigateToContact(getAdjacentContactId(id, -1));
   }, [id, navigateToContact]);
@@ -90,6 +142,8 @@ export default function ColdCallContactDetailScreen() {
   const handleNext = useCallback(() => {
     if (!id) return;
     setDurationLocked(false);
+    setDurationSource(null);
+    setLockedDurationSeconds(0);
     setInitialDuration('0');
     navigateToContact(getAdjacentContactId(id, 1));
   }, [id, navigateToContact]);
@@ -99,7 +153,15 @@ export default function ColdCallContactDetailScreen() {
 
   function handleInAppCall(c: ColdCallContactListItem) {
     if (!c.phone) return;
-    pendingCallRef.current = { contactId: c.id, bgStart: null };
+    pendingCallRef.current = {
+      contactId: c.id,
+      phone: c.phone.trim(),
+      startedAtMs: Date.now(),
+      bgStart: null,
+    };
+    if (Platform.OS === 'android') {
+      void requestCallLogPermission();
+    }
     Linking.openURL(`tel:${c.phone}`);
   }
 
@@ -117,7 +179,17 @@ export default function ColdCallContactDetailScreen() {
   function openLogModalManual() {
     setInitialDuration('0');
     setDurationLocked(false);
+    setDurationSource('manual');
+    setLockedDurationSeconds(0);
     setLogModal(true);
+  }
+
+  function closeLogModal() {
+    setLogModal(false);
+    setDurationLocked(false);
+    setDurationSource(null);
+    setLockedDurationSeconds(0);
+    setInitialDuration('0');
   }
 
   if (loading) {
@@ -214,15 +286,14 @@ export default function ColdCallContactDetailScreen() {
         selectedAgentId={contact.assigned_agent_id}
         selectedAgentName={contact.assigned_agent_name ?? ''}
         durationLocked={durationLocked}
+        durationSource={durationSource}
+        lockedDurationSeconds={lockedDurationSeconds}
         initialDurationMinutes={initialDuration}
         hasPrev={hasPrev}
         hasNext={hasNext}
         onPrev={handlePrev}
         onNext={handleNext}
-        onClose={() => {
-          setLogModal(false);
-          setDurationLocked(false);
-        }}
+        onClose={closeLogModal}
         onSaved={() => loadContact(id)}
         onCall={handleInAppCall}
         onWhatsApp={handleWhatsApp}

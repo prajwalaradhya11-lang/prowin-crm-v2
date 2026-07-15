@@ -64,6 +64,19 @@ export default function LeadDetailScreen() {
   const [noteModal, setNoteModal] = useState(false);
   const [sheetMode, setSheetMode] = useState<LogCallSheetMode | null>(null);
   const [callDuration, setCallDuration] = useState(0);
+  const [callDurationSource, setCallDurationSource] = useState<'call_log' | 'timer' | 'manual'>('manual');
+
+  const openSheet = useCallback((mode: LogCallSheetMode, duration = 0, source: 'call_log' | 'timer' | 'manual' = 'manual') => {
+    setCallDuration(duration);
+    setCallDurationSource(source);
+    setSheetMode(mode);
+  }, []);
+
+  const onCallEnded = useCallback((result: { durationSeconds: number; source: 'call_log' | 'timer' }) => {
+    openSheet('log-call', result.durationSeconds, result.source);
+  }, [openSheet]);
+
+  const { startLeadCall } = useLeadCallTimer(onCallEnded);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [agentName, setAgentName] = useState('Unknown');
   const [infoNoteDraft, setInfoNoteDraft] = useState('');
@@ -72,17 +85,6 @@ export default function LeadDetailScreen() {
   const [agentPickerMode, setAgentPickerMode] = useState<AgentPickerMode>(null);
   const [agents, setAgents] = useState<AgentOption[]>([]);
   const [agentsLoading, setAgentsLoading] = useState(false);
-
-  const openSheet = useCallback((mode: LogCallSheetMode, duration = 0) => {
-    setCallDuration(duration);
-    setSheetMode(mode);
-  }, []);
-
-  const onCallEnded = useCallback((durationSeconds: number) => {
-    openSheet('log-call', durationSeconds);
-  }, [openSheet]);
-
-  const { startLeadCall } = useLeadCallTimer(onCallEnded);
 
   const lookupAgentName = useCallback(async (agentId: string): Promise<string | null> => {
     const { data: crmUser } = await supabase
@@ -336,7 +338,7 @@ export default function LeadDetailScreen() {
         onCall={handleCall}
         onWhatsApp={() => Linking.openURL(`https://wa.me/${lead.phone?.replace(/\D/g, '')}`)}
         onSms={handleSms}
-        onLog={() => openSheet('log-call', callDuration)}
+        onLog={() => openSheet('log-call', callDuration, 'manual')}
         renderTab={renderTab}
       />
 
@@ -360,6 +362,7 @@ export default function LeadDetailScreen() {
         mode={sheetMode ?? 'change-status'}
         lead={lead}
         durationSeconds={callDuration}
+        durationSource={callDurationSource}
         doneBy={doneBy}
         agentId={agentId}
         agentName={agentName}

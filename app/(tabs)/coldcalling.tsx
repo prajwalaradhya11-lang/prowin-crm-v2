@@ -36,6 +36,11 @@ import {
   fetchCallLogsForAgentDateRange,
   resolveEmployeeIdForUser,
 } from '../../lib/callLog';
+import {
+  requestCallLogPermission,
+  resolveAfterOutgoingCall,
+  type CallDurationSource,
+} from '../../lib/androidCallLog';
 
 function toDateIso(d: Date): string {
   return format(d, 'yyyy-MM-dd');
@@ -70,11 +75,19 @@ export default function ColdCallingScreen() {
   const [logModal, setLogModal] = useState(false);
   const [selectedContact, setSelectedContact] = useState<ColdCallContactListItem | null>(null);
   const [durationLocked, setDurationLocked] = useState(false);
+  const [durationSource, setDurationSource] = useState<CallDurationSource | 'manual' | null>(null);
+  const [lockedDurationSeconds, setLockedDurationSeconds] = useState(0);
   const [initialDuration, setInitialDuration] = useState('0');
   const [datePickerOpen, setDatePickerOpen] = useState(false);
   const [rangePickerField, setRangePickerField] = useState<'start' | 'end'>('start');
 
-  const pendingCallRef = useRef<{ contactId: string; bgStart: number | null } | null>(null);
+  const pendingCallRef = useRef<{
+    contactId: string;
+    phone: string;
+    startedAtMs: number;
+    bgStart: number | null;
+  } | null>(null);
+  const resolvingCallRef = useRef(false);
   const appStateRef = useRef(AppState.currentState);
 
   const rangeStartIso = toDateIso(rangeStart);
@@ -212,12 +225,18 @@ export default function ColdCallingScreen() {
 
   function openLogModal(
     contact: ColdCallContactListItem,
-    duration = '0',
-    locked = false,
+    options?: {
+      durationMinutes?: string;
+      locked?: boolean;
+      durationSource?: CallDurationSource | 'manual' | null;
+      lockedDurationSeconds?: number;
+    },
   ) {
     setSelectedContact(contact);
-    setInitialDuration(duration);
-    setDurationLocked(locked);
+    setInitialDuration(options?.durationMinutes ?? '0');
+    setDurationLocked(options?.locked ?? false);
+    setDurationSource(options?.durationSource ?? (options?.locked ? 'timer' : 'manual'));
+    setLockedDurationSeconds(options?.lockedDurationSeconds ?? 0);
     setLogModal(true);
   }
 
@@ -230,18 +249,60 @@ export default function ColdCallingScreen() {
         pendingCallRef.current.bgStart = Date.now();
       }
 
-      if (prev.match(/inactive|background/) && nextState === 'active' && pendingCallRef.current?.bgStart) {
-        const elapsedMs = Date.now() - pendingCallRef.current.bgStart;
-        const mins = Math.max(0, Math.round(elapsedMs / 60000));
-        const contactId = pendingCallRef.current.contactId;
+      if (
+        prev.match(/inactive|background/)
+        && nextState === 'active'
+        && pendingCallRef.current?.bgStart
+        && !resolvingCallRef.current
+      ) {
+        const pending = pendingCallRef.current;
         pendingCallRef.current = null;
+        resolvingCallRef.current = true;
 
-        const contact = filteredContacts.find(c => c.id === contactId)
-          ?? contacts.find(c => c.id === contactId)
+        const elapsedMs = Date.now() - (pending.bgStart ?? Date.now());
+        const timerFallbackSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+        const mins = Math.max(0, Math.round(elapsedMs / 60000));
+
+        const contact = filteredContacts.find(c => c.id === pending.contactId)
+          ?? contacts.find(c => c.id === pending.contactId)
           ?? null;
-        if (contact) {
-          openLogModal(contact, String(mins), true);
-        }
+
+        void (async () => {
+          try {
+            if (!contact) return;
+            const resolved = await resolveAfterOutgoingCall({
+              phone: pending.phone,
+              startedAtMs: pending.startedAtMs,
+              timerFallbackSeconds,
+            });
+
+            if (resolved.source === 'call_log') {
+              openLogModal(contact, {
+                locked: true,
+                durationSource: 'call_log',
+                lockedDurationSeconds: resolved.durationSeconds,
+                durationMinutes: '0',
+              });
+            } else {
+              openLogModal(contact, {
+                locked: true,
+                durationSource: 'timer',
+                durationMinutes: String(mins),
+              });
+            }
+          } catch (error) {
+            console.warn('[coldcalling] resolve duration failed', error);
+            if (contact) {
+              openLogModal(contact, {
+                locked: true,
+                durationSource: 'timer',
+                durationMinutes: String(mins),
+              });
+            }
+          } finally {
+            resolvingCallRef.current = false;
+          }
+        })();
       }
     });
     return () => sub.remove();
@@ -251,6 +312,8 @@ export default function ColdCallingScreen() {
     setLogModal(false);
     setSelectedContact(null);
     setDurationLocked(false);
+    setDurationSource(null);
+    setLockedDurationSeconds(0);
     setInitialDuration('0');
   }
 
@@ -261,7 +324,15 @@ export default function ColdCallingScreen() {
 
   function handleInAppCall(contact: ColdCallContactListItem) {
     if (!contact.phone) return;
-    pendingCallRef.current = { contactId: contact.id, bgStart: null };
+    pendingCallRef.current = {
+      contactId: contact.id,
+      phone: contact.phone.trim(),
+      startedAtMs: Date.now(),
+      bgStart: null,
+    };
+    if (Platform.OS === 'android') {
+      void requestCallLogPermission();
+    }
     Linking.openURL(`tel:${contact.phone}`);
   }
 
@@ -313,6 +384,8 @@ export default function ColdCallingScreen() {
     if (next) {
       setSelectedContact(next);
       setDurationLocked(false);
+      setDurationSource('manual');
+      setLockedDurationSeconds(0);
       setInitialDuration('0');
     }
   }
@@ -573,6 +646,8 @@ export default function ColdCallingScreen() {
         selectedAgentId={selectedAgentId}
         selectedAgentName={selectedAgentName}
         durationLocked={durationLocked}
+        durationSource={durationSource}
+        lockedDurationSeconds={lockedDurationSeconds}
         initialDurationMinutes={initialDuration}
         hasPrev={logHasPrev}
         hasNext={logHasNext}
