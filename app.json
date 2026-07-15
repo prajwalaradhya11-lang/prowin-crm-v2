@@ -25,7 +25,8 @@
       "predictiveBackGestureEnabled": false,
       "package": "com.prowin.prowincrmv2",
       "permissions": [
-        "android.permission.READ_CALL_LOG"
+        "android.permission.READ_CALL_LOG",
+        "android.permission.RECORD_AUDIO"
       ]
     },
     "web": {
@@ -39,7 +40,17 @@
     "plugins": [
       "expo-font",
       "@react-native-community/datetimepicker",
-      "expo-notifications"
+      "expo-notifications",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow $(PRODUCT_NAME) to use the microphone for AI Assistant voice input.",
+          "speechRecognitionPermission": "Allow $(PRODUCT_NAME) to use speech recognition for AI Assistant.",
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox"
+          ]
+        }
+      ]
     ]
   }
 }
