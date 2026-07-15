@@ -1,8 +1,8 @@
-import { format, startOfMonth, startOfWeek } from 'date-fns';
+import { format, startOfDay, startOfMonth, startOfWeek } from 'date-fns';
 import { supabase } from './supabase';
 import type { CrmUser } from '../hooks/useCrmSession';
 
-export type RecruitmentReportPeriod = 'This Week' | 'This Month' | 'All Time';
+export type RecruitmentReportPeriod = 'Today' | 'This Week' | 'This Month' | 'All Time';
 
 export type RecruitmentReportResult = {
   callsInPeriod: number;
@@ -14,6 +14,43 @@ export type RecruitmentReportResult = {
   atInterviewCount: number;
   employees: { total: number; active: number; terminated: number } | null;
 };
+
+export type RecruitmentCallerRow = {
+  recruiterId: string;
+  recruiterName: string;
+  calls: number;
+  talkTimeSeconds: number;
+  byResult: Record<string, number>;
+};
+
+export type RecruitmentCallingReportResult = {
+  totalCalls: number;
+  talkTimeSeconds: number;
+  rows: RecruitmentCallerRow[];
+  resultColumns: readonly string[];
+};
+
+export const RECRUITMENT_CALL_RESULTS = [
+  'Connected',
+  'No Answer',
+  'Not Reachable',
+  'Interested',
+  'Not Interested',
+  'Callback',
+] as const;
+
+export const RECRUITMENT_REPORT_PERIODS: RecruitmentReportPeriod[] = [
+  'This Week',
+  'This Month',
+  'All Time',
+];
+
+export const RECRUITMENT_CALLING_REPORT_PERIODS: RecruitmentReportPeriod[] = [
+  'Today',
+  'This Week',
+  'This Month',
+  'All Time',
+];
 
 const PIPELINE_STATUSES = [
   'New',
@@ -40,6 +77,13 @@ export const EMPTY_RECRUITMENT_REPORT: RecruitmentReportResult = {
   employees: null,
 };
 
+export const EMPTY_RECRUITMENT_CALLING_REPORT: RecruitmentCallingReportResult = {
+  totalCalls: 0,
+  talkTimeSeconds: 0,
+  rows: [],
+  resultColumns: RECRUITMENT_CALL_RESULTS,
+};
+
 function isRecruiterRole(role: string | null | undefined): boolean {
   return role === 'recruiter';
 }
@@ -57,13 +101,20 @@ function normalizeCallStatus(status: string | null | undefined): string {
 
 function periodStartIso(period: RecruitmentReportPeriod): string | null {
   const now = new Date();
+  if (period === 'All Time') return null;
+  if (period === 'Today') return startOfDay(now).toISOString();
   if (period === 'This Week') return startOfWeek(now).toISOString();
-  if (period === 'This Month') return startOfMonth(now).toISOString();
-  return null;
+  return startOfMonth(now).toISOString();
 }
 
 function todayDateOnly(): string {
   return format(new Date(), 'yyyy-MM-dd');
+}
+
+function emptyResultCounts(): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const result of RECRUITMENT_CALL_RESULTS) counts[result] = 0;
+  return counts;
 }
 
 export function formatTalkTimeShort(totalSeconds: number): string {
@@ -74,6 +125,103 @@ export function formatTalkTimeShort(totalSeconds: number): string {
   if (hours <= 0) return `${minutes}m`;
   if (minutes <= 0) return `${hours}h`;
   return `${hours}h ${minutes}m`;
+}
+
+export async function fetchRecruitmentCallingReport(
+  user: CrmUser | null,
+  role: string | null,
+  period: RecruitmentReportPeriod,
+): Promise<RecruitmentCallingReportResult> {
+  try {
+    if (!canViewAllRecruitment(role) && !isRecruiterRole(role)) {
+      return EMPTY_RECRUITMENT_CALLING_REPORT;
+    }
+    if (isRecruiterRole(role) && !user?.id) {
+      return EMPTY_RECRUITMENT_CALLING_REPORT;
+    }
+
+    const fromIso = periodStartIso(period);
+    const isRecruiter = isRecruiterRole(role);
+
+    let callLogsQuery = supabase
+      .from('recruitment_call_logs')
+      .select('id, recruiter_id, recruiter_name, call_result, duration_seconds, call_start_time');
+
+    if (fromIso) {
+      callLogsQuery = callLogsQuery.gte('call_start_time', fromIso);
+    }
+    if (isRecruiter && user?.id) {
+      callLogsQuery = callLogsQuery.eq('recruiter_id', user.id);
+    }
+
+    const { data, error } = await callLogsQuery;
+    if (error) {
+      console.warn('[recruitmentReports] calling report', error.message);
+      return EMPTY_RECRUITMENT_CALLING_REPORT;
+    }
+
+    const callLogs = data ?? [];
+    const byRecruiter = new Map<string, RecruitmentCallerRow>();
+    let talkTimeSeconds = 0;
+
+    for (const log of callLogs) {
+      const duration = Math.max(0, Number(log.duration_seconds) || 0);
+      talkTimeSeconds += duration;
+
+      const recruiterId = log.recruiter_id?.trim() || '__unknown__';
+      const storedName = log.recruiter_name?.trim();
+      let row = byRecruiter.get(recruiterId);
+      if (!row) {
+        row = {
+          recruiterId,
+          recruiterName: storedName || 'Unknown recruiter',
+          calls: 0,
+          talkTimeSeconds: 0,
+          byResult: emptyResultCounts(),
+        };
+        byRecruiter.set(recruiterId, row);
+      } else if (storedName) {
+        row.recruiterName = storedName;
+      }
+
+      row.calls += 1;
+      row.talkTimeSeconds += duration;
+
+      const result = log.call_result?.trim() || 'Unknown';
+      if (result in row.byResult) {
+        row.byResult[result] += 1;
+      } else {
+        row.byResult[result] = (row.byResult[result] ?? 0) + 1;
+      }
+    }
+
+    const knownResults = new Set<string>(RECRUITMENT_CALL_RESULTS);
+    const extraResults = new Set<string>();
+    for (const row of byRecruiter.values()) {
+      for (const key of Object.keys(row.byResult)) {
+        if (!knownResults.has(key) && row.byResult[key] > 0) extraResults.add(key);
+      }
+    }
+    const resultColumns = [
+      ...RECRUITMENT_CALL_RESULTS,
+      ...Array.from(extraResults).sort((a, b) => a.localeCompare(b)),
+    ];
+
+    const rows = Array.from(byRecruiter.values()).sort((a, b) => {
+      if (b.calls !== a.calls) return b.calls - a.calls;
+      return a.recruiterName.localeCompare(b.recruiterName);
+    });
+
+    return {
+      totalCalls: callLogs.length,
+      talkTimeSeconds,
+      rows,
+      resultColumns,
+    };
+  } catch (e) {
+    console.warn('[recruitmentReports] calling report unexpected error', e);
+    return EMPTY_RECRUITMENT_CALLING_REPORT;
+  }
 }
 
 export async function fetchRecruitmentReport(

@@ -9,15 +9,20 @@ import { ProwinHeader, PageTitle, Card, Avatar } from '../../components/ui';
 import { format, startOfMonth, endOfMonth, startOfWeek, endOfWeek, startOfDay, endOfDay, parseISO } from 'date-fns';
 import { useCrmSession, type CrmUser } from '../../hooks/useCrmSession';
 import {
+  EMPTY_RECRUITMENT_CALLING_REPORT,
   EMPTY_RECRUITMENT_REPORT,
+  RECRUITMENT_CALLING_REPORT_PERIODS,
+  RECRUITMENT_REPORT_PERIODS,
+  fetchRecruitmentCallingReport,
   fetchRecruitmentReport,
   formatTalkTimeShort,
+  type RecruitmentCallingReportResult,
+  type RecruitmentCallerRow,
   type RecruitmentReportPeriod,
   type RecruitmentReportResult,
 } from '../../lib/recruitmentReports';
 
 const PERIODS = ['Today', 'This Week', 'This Month', 'Last Month'];
-const HR_PERIODS: RecruitmentReportPeriod[] = ['This Week', 'This Month', 'All Time'];
 
 const PIPELINE_COLORS: Record<string, string> = {
   New: '#0284c7',
@@ -213,6 +218,43 @@ function formatInterviewDate(value: string): string {
   }
 }
 
+function periodLabel(period: RecruitmentReportPeriod): string {
+  return period === 'All Time' ? 'All' : period;
+}
+
+function CallingRecruiterCard({
+  row,
+  resultColumns,
+}: {
+  row: RecruitmentCallerRow;
+  resultColumns: readonly string[];
+}) {
+  return (
+    <View style={s.callerCard}>
+      <View style={s.callerTop}>
+        <Text style={s.agentName} numberOfLines={1}>
+          {row.recruiterName}
+        </Text>
+        <Text style={s.callerTalk}>{formatTalkTimeShort(row.talkTimeSeconds)}</Text>
+      </View>
+      <Text style={s.callerCalls}>{row.calls} call{row.calls === 1 ? '' : 's'}</Text>
+      <View style={s.resultWrap}>
+        {resultColumns.map((result) => {
+          const count = row.byResult[result] ?? 0;
+          if (count <= 0) return null;
+          return (
+            <View key={result} style={s.resultChip}>
+              <Text style={s.resultChipText}>
+                {result}: {count}
+              </Text>
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 function RecruitmentReportsView({
   user,
   role,
@@ -220,15 +262,34 @@ function RecruitmentReportsView({
   user: CrmUser | null;
   role: string | null;
 }) {
+  type ReportView = 'overview' | 'calling';
+  const [view, setView] = useState<ReportView>('overview');
   const [period, setPeriod] = useState<RecruitmentReportPeriod>('This Month');
   const [data, setData] = useState<RecruitmentReportResult>(EMPTY_RECRUITMENT_REPORT);
+  const [callingData, setCallingData] = useState<RecruitmentCallingReportResult>(
+    EMPTY_RECRUITMENT_CALLING_REPORT,
+  );
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
+  const periodOptions =
+    view === 'calling' ? RECRUITMENT_CALLING_REPORT_PERIODS : RECRUITMENT_REPORT_PERIODS;
+
   const load = useCallback(async () => {
+    if (view === 'calling') {
+      const next = await fetchRecruitmentCallingReport(user, role, period);
+      setCallingData(next);
+      return;
+    }
     const next = await fetchRecruitmentReport(user, role, period);
     setData(next);
-  }, [user, role, period]);
+  }, [user, role, period, view]);
+
+  useEffect(() => {
+    if (view === 'overview' && period === 'Today') {
+      setPeriod('This Month');
+    }
+  }, [view, period]);
 
   useEffect(() => {
     let cancelled = false;
@@ -237,7 +298,9 @@ function RecruitmentReportsView({
       await load();
       if (!cancelled) setLoading(false);
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [load]);
 
   const onRefresh = useCallback(async () => {
@@ -255,10 +318,40 @@ function RecruitmentReportsView({
       <ProwinHeader />
       <PageTitle label="Recruitment" title="Reports" />
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.periodScroll} contentContainerStyle={s.periodRow}>
-        {HR_PERIODS.map((p) => (
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={s.periodScroll}
+        contentContainerStyle={s.periodRow}
+      >
+        {(
+          [
+            { id: 'overview' as const, label: 'Overview' },
+            { id: 'calling' as const, label: 'Calling' },
+          ] as const
+        ).map((option) => {
+          const active = view === option.id;
+          return (
+            <TouchableOpacity
+              key={option.id}
+              style={[s.viewTab, active && s.viewTabOn]}
+              onPress={() => setView(option.id)}
+            >
+              <Text style={[s.viewTabText, active && s.viewTabTextOn]}>{option.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={s.periodScrollTight}
+        contentContainerStyle={s.periodRow}
+      >
+        {periodOptions.map((p) => (
           <TouchableOpacity key={p} style={[s.pTab, period === p && s.pTabOn]} onPress={() => setPeriod(p)}>
-            <Text style={[s.pTabText, period === p && s.pTabTextOn]}>{p}</Text>
+            <Text style={[s.pTabText, period === p && s.pTabTextOn]}>{periodLabel(p)}</Text>
           </TouchableOpacity>
         ))}
       </ScrollView>
@@ -276,102 +369,149 @@ function RecruitmentReportsView({
             <Text style={s.liveText}>Live · {format(new Date(), 'd MMM yyyy · HH:mm')}</Text>
           </View>
 
-          <View style={s.statsGrid}>
-            <View style={s.statCard}>
-              <Text style={s.statLabel}>CALLS</Text>
-              <Text style={s.statVal}>{data.callsInPeriod}</Text>
-            </View>
-            <View style={s.statCard}>
-              <Text style={s.statLabel}>TALK TIME</Text>
-              <Text style={s.statVal}>{formatTalkTimeShort(data.talkTimeSeconds)}</Text>
-            </View>
-          </View>
-          <View style={[s.statsGrid, { marginTop: 8, marginBottom: 12 }]}>
-            <View style={s.statCard}>
-              <Text style={s.statLabel}>CANDIDATES ADDED</Text>
-              <Text style={s.statVal}>{data.candidatesAddedInPeriod}</Text>
-            </View>
-            <View style={s.statCard}>
-              <Text style={s.statLabel}>AT INTERVIEW</Text>
-              <Text style={s.statVal}>{data.atInterviewCount}</Text>
-            </View>
-          </View>
-
-          <Card>
-            <Text style={s.chartTitle}>CALLS BY RESULT</Text>
-            {data.callsByResult.length === 0 && <Text style={s.noData}>No calls in this period</Text>}
-            {data.callsByResult.map(({ result, count }) => (
-              <View key={result} style={s.barRow}>
-                <Text style={s.barLabelWide} numberOfLines={1}>{result}</Text>
-                <View style={s.barTrack}>
-                  <View style={[s.barFill, { width: `${(count / maxCalls) * 100}%`, backgroundColor: COLORS.blue }]} />
+          {view === 'calling' ? (
+            callingData.totalCalls === 0 || callingData.rows.length === 0 ? (
+              <Card>
+                <View style={s.emptyCalling}>
+                  <Ionicons name="call-outline" size={22} color={COLORS.muted} />
+                  <Text style={s.emptyCallingTitle}>No calls in this period</Text>
+                  <Text style={s.emptyCallingBody}>
+                    Logged recruitment calls will show here once recruiters start dialing candidates.
+                  </Text>
                 </View>
-                <Text style={s.barVal}>{count}</Text>
-              </View>
-            ))}
-          </Card>
-
-          <Card>
-            <Text style={s.chartTitle}>PIPELINE (NOW)</Text>
-            {data.pipelineByStatus.every((row) => row.count === 0) && (
-              <Text style={s.noData}>No candidates yet</Text>
-            )}
-            {data.pipelineByStatus.map(({ status, count }) => (
-              <View key={status} style={s.barRow}>
-                <Text style={s.barLabelWide} numberOfLines={1}>{status}</Text>
-                <View style={s.barTrack}>
-                  <View
-                    style={[
-                      s.barFill,
-                      {
-                        width: `${(count / maxPipeline) * 100}%`,
-                        backgroundColor: PIPELINE_COLORS[status] ?? COLORS.muted,
-                      },
-                    ]}
-                  />
+              </Card>
+            ) : (
+              <>
+                <View style={[s.statsGrid, { marginBottom: 12 }]}>
+                  <View style={s.statCard}>
+                    <Text style={s.statLabel}>TOTAL CALLS</Text>
+                    <Text style={s.statVal}>{callingData.totalCalls}</Text>
+                  </View>
+                  <View style={s.statCard}>
+                    <Text style={s.statLabel}>TALK TIME</Text>
+                    <Text style={s.statVal}>{formatTalkTimeShort(callingData.talkTimeSeconds)}</Text>
+                  </View>
                 </View>
-                <Text style={s.barVal}>{count}</Text>
-              </View>
-            ))}
-          </Card>
 
-          <Card>
-            <Text style={s.chartTitle}>UPCOMING INTERVIEWS</Text>
-            {data.upcomingInterviews.length === 0 && (
-              <Text style={s.noData}>No upcoming interviews</Text>
-            )}
-            {data.upcomingInterviews.map((item, index) => (
-              <View
-                key={`${item.candidate_name}-${item.interview_date}-${index}`}
-                style={[s.interviewRow, index < data.upcomingInterviews.length - 1 && s.agentBorder]}
-              >
-                <Ionicons name="calendar-outline" size={16} color={COLORS.blue} />
-                <View style={{ flex: 1 }}>
-                  <Text style={s.agentName}>{item.candidate_name}</Text>
-                  <Text style={s.agentMeta}>{formatInterviewDate(item.interview_date)}</Text>
-                </View>
-              </View>
-            ))}
-          </Card>
-
-          {showEmployees && data.employees && (
-            <Card>
-              <Text style={s.chartTitle}>EMPLOYEES</Text>
+                <Card>
+                  <Text style={s.chartTitle}>CALLING BY RECRUITER</Text>
+                  {callingData.rows.map((row, index) => (
+                    <View
+                      key={row.recruiterId}
+                      style={index < callingData.rows.length - 1 ? s.callerCardBorder : undefined}
+                    >
+                      <CallingRecruiterCard row={row} resultColumns={callingData.resultColumns} />
+                    </View>
+                  ))}
+                </Card>
+              </>
+            )
+          ) : (
+            <>
               <View style={s.statsGrid}>
-                <View style={s.miniStat}>
-                  <Text style={s.statLabel}>TOTAL</Text>
-                  <Text style={s.miniStatVal}>{data.employees.total}</Text>
+                <View style={s.statCard}>
+                  <Text style={s.statLabel}>CALLS</Text>
+                  <Text style={s.statVal}>{data.callsInPeriod}</Text>
                 </View>
-                <View style={s.miniStat}>
-                  <Text style={s.statLabel}>ACTIVE</Text>
-                  <Text style={[s.miniStatVal, { color: COLORS.green }]}>{data.employees.active}</Text>
-                </View>
-                <View style={s.miniStat}>
-                  <Text style={s.statLabel}>TERMINATED</Text>
-                  <Text style={[s.miniStatVal, { color: COLORS.muted }]}>{data.employees.terminated}</Text>
+                <View style={s.statCard}>
+                  <Text style={s.statLabel}>TALK TIME</Text>
+                  <Text style={s.statVal}>{formatTalkTimeShort(data.talkTimeSeconds)}</Text>
                 </View>
               </View>
-            </Card>
+              <View style={[s.statsGrid, { marginTop: 8, marginBottom: 12 }]}>
+                <View style={s.statCard}>
+                  <Text style={s.statLabel}>CANDIDATES ADDED</Text>
+                  <Text style={s.statVal}>{data.candidatesAddedInPeriod}</Text>
+                </View>
+                <View style={s.statCard}>
+                  <Text style={s.statLabel}>AT INTERVIEW</Text>
+                  <Text style={s.statVal}>{data.atInterviewCount}</Text>
+                </View>
+              </View>
+
+              <Card>
+                <Text style={s.chartTitle}>CALLS BY RESULT</Text>
+                {data.callsByResult.length === 0 && <Text style={s.noData}>No calls in this period</Text>}
+                {data.callsByResult.map(({ result, count }) => (
+                  <View key={result} style={s.barRow}>
+                    <Text style={s.barLabelWide} numberOfLines={1}>
+                      {result}
+                    </Text>
+                    <View style={s.barTrack}>
+                      <View
+                        style={[s.barFill, { width: `${(count / maxCalls) * 100}%`, backgroundColor: COLORS.blue }]}
+                      />
+                    </View>
+                    <Text style={s.barVal}>{count}</Text>
+                  </View>
+                ))}
+              </Card>
+
+              <Card>
+                <Text style={s.chartTitle}>PIPELINE (NOW)</Text>
+                {data.pipelineByStatus.every((row) => row.count === 0) && (
+                  <Text style={s.noData}>No candidates yet</Text>
+                )}
+                {data.pipelineByStatus.map(({ status, count }) => (
+                  <View key={status} style={s.barRow}>
+                    <Text style={s.barLabelWide} numberOfLines={1}>
+                      {status}
+                    </Text>
+                    <View style={s.barTrack}>
+                      <View
+                        style={[
+                          s.barFill,
+                          {
+                            width: `${(count / maxPipeline) * 100}%`,
+                            backgroundColor: PIPELINE_COLORS[status] ?? COLORS.muted,
+                          },
+                        ]}
+                      />
+                    </View>
+                    <Text style={s.barVal}>{count}</Text>
+                  </View>
+                ))}
+              </Card>
+
+              <Card>
+                <Text style={s.chartTitle}>UPCOMING INTERVIEWS</Text>
+                {data.upcomingInterviews.length === 0 && (
+                  <Text style={s.noData}>No upcoming interviews</Text>
+                )}
+                {data.upcomingInterviews.map((item, index) => (
+                  <View
+                    key={`${item.candidate_name}-${item.interview_date}-${index}`}
+                    style={[s.interviewRow, index < data.upcomingInterviews.length - 1 && s.agentBorder]}
+                  >
+                    <Ionicons name="calendar-outline" size={16} color={COLORS.blue} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.agentName}>{item.candidate_name}</Text>
+                      <Text style={s.agentMeta}>{formatInterviewDate(item.interview_date)}</Text>
+                    </View>
+                  </View>
+                ))}
+              </Card>
+
+              {showEmployees && data.employees && (
+                <Card>
+                  <Text style={s.chartTitle}>EMPLOYEES</Text>
+                  <View style={s.statsGrid}>
+                    <View style={s.miniStat}>
+                      <Text style={s.statLabel}>TOTAL</Text>
+                      <Text style={s.miniStatVal}>{data.employees.total}</Text>
+                    </View>
+                    <View style={s.miniStat}>
+                      <Text style={s.statLabel}>ACTIVE</Text>
+                      <Text style={[s.miniStatVal, { color: COLORS.green }]}>{data.employees.active}</Text>
+                    </View>
+                    <View style={s.miniStat}>
+                      <Text style={s.statLabel}>TERMINATED</Text>
+                      <Text style={[s.miniStatVal, { color: COLORS.muted }]}>{data.employees.terminated}</Text>
+                    </View>
+                  </View>
+                </Card>
+              )}
+            </>
           )}
 
           <View style={{ height: 24 }} />
@@ -405,7 +545,19 @@ const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   centered: { alignItems: 'center', justifyContent: 'center' },
   periodScroll: { flexGrow: 0, marginTop: 10 },
+  periodScrollTight: { flexGrow: 0, marginTop: 6 },
   periodRow: { paddingHorizontal: 14, gap: 6, paddingBottom: 4 },
+  viewTab: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.white,
+  },
+  viewTabOn: { backgroundColor: COLORS.text, borderColor: COLORS.text },
+  viewTabText: { fontSize: 12, fontWeight: '700', color: COLORS.muted },
+  viewTabTextOn: { color: '#fff' },
   pTab: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white },
   pTabOn: { backgroundColor: COLORS.red, borderColor: COLORS.red },
   pTabText: { fontSize: 12, fontWeight: '600', color: COLORS.muted },
@@ -420,6 +572,24 @@ const s = StyleSheet.create({
   statVal: { fontSize: 24, fontWeight: '800', color: COLORS.text, marginTop: 4 },
   chartTitle: { fontSize: 10, fontWeight: '700', color: COLORS.muted, letterSpacing: 0.6, marginBottom: 12 },
   noData: { fontSize: 13, color: COLORS.muted, paddingVertical: 8 },
+  emptyCalling: { alignItems: 'center', paddingVertical: 18, paddingHorizontal: 8 },
+  emptyCallingTitle: { marginTop: 10, fontSize: 14, fontWeight: '700', color: COLORS.text },
+  emptyCallingBody: { marginTop: 6, fontSize: 12, color: COLORS.muted, textAlign: 'center', lineHeight: 17 },
+  callerCard: { paddingVertical: 10 },
+  callerCardBorder: { borderBottomWidth: 1, borderBottomColor: COLORS.border },
+  callerTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  callerTalk: { fontSize: 12, fontWeight: '700', color: COLORS.blue },
+  callerCalls: { marginTop: 2, fontSize: 12, fontWeight: '600', color: COLORS.muted },
+  resultWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  resultChip: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.bg,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  resultChipText: { fontSize: 11, fontWeight: '600', color: COLORS.text },
   barRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
   barLabel: { fontSize: 11, color: COLORS.muted, width: 64, textAlign: 'right' },
   barLabelWide: { fontSize: 11, color: COLORS.muted, width: 88, textAlign: 'right' },
