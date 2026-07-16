@@ -23,6 +23,13 @@ import { ProwinHeader, PageTitle } from '../../components/ui';
 import { LeadStatusTabsPager } from '../../components/leads/LeadStatusTabsPager';
 import { useCrmSession, getUserDisplayName, type CrmUser } from '../../hooks/useCrmSession';
 import { THEME } from '../../lib/prowinTheme';
+import {
+  buildDatedExportBasename,
+  exportRowsToFileUri,
+  shareExportFile,
+} from '../../lib/exportDownload';
+import { fetchAllRecruitment, type RecruitmentExportRow } from '../../lib/fetchAllRecruitment';
+import { RECRUITMENT_EXPORT_COLUMNS } from '../../lib/recruitmentExportColumns';
 
 const RECRUITMENT_SELECT_COLUMNS =
   'id,candidate_name,source,position_applied,phone,email,interview_status,offer_status,joining_status,notes,cv_url,assigned_recruiter_id,assigned_recruiter_name,added_by_id,added_by_name,call_status,follow_up_date,created_at';
@@ -315,6 +322,7 @@ export default function RecruitmentScreen() {
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [addedByFilter, setAddedByFilter] = useState('all');
+  const [exporting, setExporting] = useState(false);
 
   const baseFiltered = useMemo(() => {
     const createdRange = getCreatedAtFilterRange(createdPreset, customFrom, customTo);
@@ -448,6 +456,60 @@ export default function RecruitmentScreen() {
     Alert.alert('Success', 'Candidate added.');
   }, [form, role, user, closeModal, fetchCandidates]);
 
+  const runRecruitmentExport = useCallback(
+    async (scope: 'filtered' | 'all') => {
+      setExporting(true);
+      try {
+        let rows: RecruitmentExportRow[];
+        if (scope === 'filtered') {
+          rows = (candidatesByTab[activeTabIndex] ?? []) as RecruitmentExportRow[];
+          if (rows.length === 0) {
+            Alert.alert('Export', 'No candidates in the current filtered view to export.');
+            return;
+          }
+        } else {
+          const { data, error } = await fetchAllRecruitment(user, role);
+          if (error) throw error;
+          rows = data;
+          if (rows.length === 0) {
+            Alert.alert('Export', 'No candidates to export.');
+            return;
+          }
+        }
+
+        const uri = await exportRowsToFileUri({
+          rows,
+          columns: RECRUITMENT_EXPORT_COLUMNS,
+          filename: buildDatedExportBasename('recruitment_candidates'),
+        });
+        await shareExportFile(uri, { dialogTitle: 'Export candidates CSV' });
+      } catch (e) {
+        Alert.alert(
+          'Export failed',
+          e instanceof Error ? e.message : 'Could not export candidates.',
+        );
+      } finally {
+        setExporting(false);
+      }
+    },
+    [activeTabIndex, candidatesByTab, role, user],
+  );
+
+  const handleExportPress = useCallback(() => {
+    if (exporting) return;
+    Alert.alert('Export candidates', 'Choose which candidates to export as CSV.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Current filtered view',
+        onPress: () => void runRecruitmentExport('filtered'),
+      },
+      {
+        text: 'All records',
+        onPress: () => void runRecruitmentExport('all'),
+      },
+    ]);
+  }, [exporting, runRecruitmentExport]);
+
   const renderCandidatePage = useCallback(
     (tabIndex: number) => {
       const pageCandidates = candidatesByTab[tabIndex] ?? [];
@@ -494,16 +556,30 @@ export default function RecruitmentScreen() {
     <View style={s.container}>
       <ProwinHeader
         rightContent={
-          <TouchableOpacity
-            style={s.addBtn}
-            onPress={() => {
-              resetForm();
-              setAddModal(true);
-            }}
-            accessibilityLabel="Add candidate"
-          >
-            <Ionicons name="add" size={20} color="#fff" />
-          </TouchableOpacity>
+          <View style={s.headerActions}>
+            <TouchableOpacity
+              style={s.exportBtn}
+              onPress={handleExportPress}
+              disabled={exporting || showLoading}
+              accessibilityLabel="Export candidates"
+            >
+              {exporting ? (
+                <ActivityIndicator size="small" color={COLORS.red} />
+              ) : (
+                <Ionicons name="download-outline" size={20} color={COLORS.red} />
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={s.addBtn}
+              onPress={() => {
+                resetForm();
+                setAddModal(true);
+              }}
+              accessibilityLabel="Add candidate"
+            >
+              <Ionicons name="add" size={20} color="#fff" />
+            </TouchableOpacity>
+          </View>
         }
       />
       <PageTitle label="Recruitment" title="Candidates" />
@@ -732,6 +808,17 @@ export default function RecruitmentScreen() {
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  exportBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.redLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.redBorder,
+  },
   addBtn: {
     width: 32,
     height: 32,

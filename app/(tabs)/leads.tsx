@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, Linking, RefreshControl, Modal,
-  ActivityIndicator, FlatList, TouchableOpacity, ScrollView, Pressable,
+  ActivityIndicator, FlatList, TouchableOpacity, ScrollView, Pressable, Alert,
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -26,6 +26,13 @@ import {
 } from '../../lib/leadFields';
 import { setLeadNavIds } from '../../lib/leadNav';
 import { THEME } from '../../lib/prowinTheme';
+import {
+  buildDatedExportBasename,
+  exportRowsToFileUri,
+  shareExportFile,
+} from '../../lib/exportDownload';
+import { fetchAllLeads } from '../../lib/fetchAllLeads';
+import { LEADS_EXPORT_COLUMNS } from '../../lib/leadsExportColumns';
 
 type QuickStatFilter = null | 'total' | 'active' | 'callback' | 'meetings';
 
@@ -83,6 +90,7 @@ export default function LeadsScreen() {
   const [msgLoading, setMsgLoading] = useState(false);
   const [msgType, setMsgType] = useState<'whatsapp' | 'email'>('whatsapp');
   const [statusOptions, setStatusOptions] = useState<string[]>([]);
+  const [exporting, setExporting] = useState(false);
 
   const loadOptions = useCallback(async () => {
     const statuses = await fetchActiveStatusOptions();
@@ -250,6 +258,60 @@ export default function LeadsScreen() {
     router.push(`/lead/${lead.id}`);
   }, [activeTabIndex, leadsByTab]);
 
+  const runLeadsExport = useCallback(
+    async (scope: 'filtered' | 'all') => {
+      setExporting(true);
+      try {
+        let rows: any[];
+        if (scope === 'filtered') {
+          rows = leadsByTab[activeTabIndex] ?? [];
+          if (rows.length === 0) {
+            Alert.alert('Export', 'No leads in the current filtered view to export.');
+            return;
+          }
+        } else {
+          const { data, error } = await fetchAllLeads(user, role);
+          if (error) throw error;
+          rows = data;
+          if (rows.length === 0) {
+            Alert.alert('Export', 'No leads to export.');
+            return;
+          }
+        }
+
+        const uri = await exportRowsToFileUri({
+          rows,
+          columns: LEADS_EXPORT_COLUMNS,
+          filename: buildDatedExportBasename('leads'),
+        });
+        await shareExportFile(uri, { dialogTitle: 'Export leads CSV' });
+      } catch (e) {
+        Alert.alert(
+          'Export failed',
+          e instanceof Error ? e.message : 'Could not export leads.',
+        );
+      } finally {
+        setExporting(false);
+      }
+    },
+    [activeTabIndex, leadsByTab, role, user],
+  );
+
+  const handleExportPress = useCallback(() => {
+    if (exporting) return;
+    Alert.alert('Export leads', 'Choose which leads to export as CSV.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Current filtered view',
+        onPress: () => void runLeadsExport('filtered'),
+      },
+      {
+        text: 'All records',
+        onPress: () => void runLeadsExport('all'),
+      },
+    ]);
+  }, [exporting, runLeadsExport]);
+
   const renderLeadPage = useCallback((tabIndex: number) => {
     const pageLeads = leadsByTab[tabIndex] ?? [];
     return (
@@ -288,6 +350,18 @@ export default function LeadsScreen() {
       <ProwinHeader
         rightContent={
           <View style={s.headerActions}>
+            <TouchableOpacity
+              style={s.exportBtn}
+              onPress={handleExportPress}
+              disabled={exporting || loading}
+              accessibilityLabel="Export leads"
+            >
+              {exporting ? (
+                <ActivityIndicator size="small" color={THEME.red} />
+              ) : (
+                <Ionicons name="download-outline" size={20} color={THEME.red} />
+              )}
+            </TouchableOpacity>
             {!sessionLoading && canManageStatuses && (
               <TouchableOpacity
                 style={s.settingsBtn}
@@ -401,6 +475,12 @@ export default function LeadsScreen() {
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: THEME.page },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  exportBtn: {
+    width: 32, height: 32, borderRadius: 16,
+    backgroundColor: THEME.redTintFill,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: THEME.redTintBorder,
+  },
   settingsBtn: {
     width: 32, height: 32, borderRadius: 16,
     backgroundColor: THEME.redTintFill,
