@@ -48,6 +48,16 @@ const RECRUITMENT_CALL_RESULTS = [
 
 type DurationSource = 'call_log' | 'timer';
 
+const CANDIDATE_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+type CandidateDetailsEditForm = {
+  candidateName: string;
+  phone: string;
+  email: string;
+  positionApplied: string;
+  source: string;
+};
+
 type RecruitmentCandidate = {
   id: string;
   candidate_name: string;
@@ -83,6 +93,35 @@ type RecruitmentCallLog = {
 function trimOrNull(value: string): string | null {
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+function isAdminLikeRole(role: string | null | undefined): boolean {
+  return role === 'admin' || role === 'super_admin';
+}
+
+function createCandidateDetailsEditForm(candidate: RecruitmentCandidate): CandidateDetailsEditForm {
+  return {
+    candidateName: candidate.candidate_name ?? '',
+    phone: candidate.phone ?? '',
+    email: candidate.email ?? '',
+    positionApplied: candidate.position_applied ?? '',
+    source: candidate.source ?? '',
+  };
+}
+
+function validateCandidateDetailsEditForm(form: CandidateDetailsEditForm): string | null {
+  if (!form.candidateName.trim()) {
+    return 'Name is required.';
+  }
+  const phone = form.phone.trim();
+  if (phone && digitsOnly(phone).length < 7) {
+    return 'Enter a valid phone number (at least 7 digits), or leave it blank.';
+  }
+  const email = form.email.trim();
+  if (email && !CANDIDATE_EMAIL_PATTERN.test(email)) {
+    return 'Enter a valid email address, or leave it blank.';
+  }
+  return null;
 }
 
 function formatCallDuration(seconds: number | null | undefined): string {
@@ -176,7 +215,8 @@ function InfoField({
 
 export default function RecruitmentCandidateDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { user } = useCrmSession();
+  const { user, role } = useCrmSession();
+  const canEditCandidateDetails = isAdminLikeRole(role);
 
   const [candidate, setCandidate] = useState<RecruitmentCandidate | null>(null);
   const [callLogs, setCallLogs] = useState<RecruitmentCallLog[]>([]);
@@ -184,6 +224,10 @@ export default function RecruitmentCandidateDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [savingNotes, setSavingNotes] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState(false);
+  const [editSheetVisible, setEditSheetVisible] = useState(false);
+  const [editForm, setEditForm] = useState<CandidateDetailsEditForm | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [savingDetails, setSavingDetails] = useState(false);
 
   const [callActive, setCallActive] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -323,6 +367,73 @@ export default function RecruitmentCandidateDetailScreen() {
     setCandidate((prev) => (prev ? { ...prev, notes: trimOrNull(notesDraft) } : prev));
     Alert.alert('Success', 'Notes saved.');
   }, [id, notesDraft, savingNotes]);
+
+  const openEditDetails = useCallback(() => {
+    if (!canEditCandidateDetails || !candidate) return;
+    setEditForm(createCandidateDetailsEditForm(candidate));
+    setEditError(null);
+    setEditSheetVisible(true);
+  }, [canEditCandidateDetails, candidate]);
+
+  const closeEditDetails = useCallback(() => {
+    if (savingDetails) return;
+    setEditSheetVisible(false);
+    setEditForm(null);
+    setEditError(null);
+  }, [savingDetails]);
+
+  const handleSaveCandidateDetails = useCallback(async () => {
+    if (!canEditCandidateDetails || !id || !editForm || savingDetails) return;
+
+    const validationError = validateCandidateDetailsEditForm(editForm);
+    if (validationError) {
+      setEditError(validationError);
+      return;
+    }
+
+    const candidateName = editForm.candidateName.trim();
+    const phone = trimOrNull(editForm.phone);
+    const email = trimOrNull(editForm.email.toLowerCase());
+    const positionApplied = trimOrNull(editForm.positionApplied);
+    const source = trimOrNull(editForm.source);
+
+    setSavingDetails(true);
+    setEditError(null);
+
+    const { error } = await supabase
+      .from('recruitment')
+      .update({
+        candidate_name: candidateName,
+        phone,
+        email,
+        position_applied: positionApplied,
+        source,
+      })
+      .eq('id', id);
+
+    setSavingDetails(false);
+
+    if (error) {
+      setEditError(error.message || 'Failed to update candidate details.');
+      return;
+    }
+
+    setCandidate((prev) =>
+      prev
+        ? {
+            ...prev,
+            candidate_name: candidateName,
+            phone,
+            email,
+            position_applied: positionApplied,
+            source,
+          }
+        : prev,
+    );
+    setEditSheetVisible(false);
+    setEditForm(null);
+    Alert.alert('Success', 'Candidate details updated.');
+  }, [canEditCandidateDetails, id, editForm, savingDetails]);
 
   const openCallLogSheet = useCallback(async () => {
     const startedAt = callStartedAtRef.current;
@@ -538,7 +649,23 @@ export default function RecruitmentCandidateDetailScreen() {
 
   return (
     <View style={s.container}>
-      <SafeScreenHeader title={candidate.candidate_name} onBack={() => router.back()} />
+      <SafeScreenHeader
+        title={candidate.candidate_name}
+        onBack={() => router.back()}
+        rightContent={
+          canEditCandidateDetails ? (
+            <TouchableOpacity
+              onPress={openEditDetails}
+              style={s.headerEditBtn}
+              accessibilityLabel="Edit candidate details"
+            >
+              <Ionicons name="pencil" size={18} color={COLORS.red} />
+            </TouchableOpacity>
+          ) : (
+            <View style={s.headerEditBtn} />
+          )
+        }
+      />
 
       <ScrollView style={s.scroll} contentContainerStyle={s.scrollContent} keyboardShouldPersistTaps="handled">
         <View style={s.section}>
@@ -778,6 +905,124 @@ export default function RecruitmentCandidateDetailScreen() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {canEditCandidateDetails && editForm ? (
+        <Modal
+          visible={editSheetVisible}
+          animationType="slide"
+          transparent
+          onRequestClose={closeEditDetails}
+        >
+          <KeyboardAvoidingView
+            style={s.modalOverlay}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          >
+            <View style={[s.modalSheet, { maxHeight: Dimensions.get('window').height * 0.85 }]}>
+              <View style={s.modalHeader}>
+                <Text style={s.modalTitle}>Edit details</Text>
+                <TouchableOpacity onPress={closeEditDetails} disabled={savingDetails}>
+                  <Ionicons name="close" size={24} color={COLORS.text} />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView
+                style={s.modalBody}
+                contentContainerStyle={s.modalBodyContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                {editError ? <Text style={s.editErrorText}>{editError}</Text> : null}
+
+                <Text style={s.fieldLabel}>NAME *</Text>
+                <TextInput
+                  style={s.editInput}
+                  value={editForm.candidateName}
+                  onChangeText={(candidateName) =>
+                    setEditForm((prev) => (prev ? { ...prev, candidateName } : prev))
+                  }
+                  placeholder="Candidate name"
+                  placeholderTextColor={COLORS.muted}
+                  editable={!savingDetails}
+                />
+
+                <Text style={s.fieldLabel}>PHONE</Text>
+                <TextInput
+                  style={s.editInput}
+                  value={editForm.phone}
+                  onChangeText={(phone) =>
+                    setEditForm((prev) => (prev ? { ...prev, phone } : prev))
+                  }
+                  placeholder="Phone number"
+                  placeholderTextColor={COLORS.muted}
+                  keyboardType="phone-pad"
+                  editable={!savingDetails}
+                />
+
+                <Text style={s.fieldLabel}>EMAIL</Text>
+                <TextInput
+                  style={s.editInput}
+                  value={editForm.email}
+                  onChangeText={(email) =>
+                    setEditForm((prev) => (prev ? { ...prev, email } : prev))
+                  }
+                  placeholder="Email"
+                  placeholderTextColor={COLORS.muted}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  editable={!savingDetails}
+                />
+
+                <Text style={s.fieldLabel}>POSITION APPLIED</Text>
+                <TextInput
+                  style={s.editInput}
+                  value={editForm.positionApplied}
+                  onChangeText={(positionApplied) =>
+                    setEditForm((prev) => (prev ? { ...prev, positionApplied } : prev))
+                  }
+                  placeholder="Role or position"
+                  placeholderTextColor={COLORS.muted}
+                  editable={!savingDetails}
+                />
+
+                <Text style={s.fieldLabel}>SOURCE (OPTIONAL)</Text>
+                <TextInput
+                  style={s.editInput}
+                  value={editForm.source}
+                  onChangeText={(source) =>
+                    setEditForm((prev) => (prev ? { ...prev, source } : prev))
+                  }
+                  placeholder="e.g. LinkedIn, referral"
+                  placeholderTextColor={COLORS.muted}
+                  editable={!savingDetails}
+                />
+              </ScrollView>
+
+              <View style={s.modalFooter}>
+                <TouchableOpacity
+                  style={s.cancelBtn}
+                  onPress={closeEditDetails}
+                  disabled={savingDetails}
+                >
+                  <Text style={s.cancelBtnText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    s.confirmBtn,
+                    (savingDetails || !editForm.candidateName.trim()) && s.btnDisabled,
+                  ]}
+                  onPress={() => void handleSaveCandidateDetails()}
+                  disabled={savingDetails || !editForm.candidateName.trim()}
+                >
+                  {savingDetails ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <Text style={s.confirmBtnText}>Save</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
+      ) : null}
     </View>
   );
 }
@@ -785,6 +1030,12 @@ export default function RecruitmentCandidateDetailScreen() {
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   centered: { alignItems: 'center', justifyContent: 'center' },
+  headerEditBtn: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   scroll: { flex: 1 },
   scrollContent: { paddingHorizontal: 14, paddingBottom: 32 },
   section: { marginTop: 16 },
@@ -1004,4 +1255,21 @@ const s = StyleSheet.create({
   },
   confirmBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
   btnDisabled: { opacity: 0.7 },
+  editInput: {
+    backgroundColor: COLORS.bg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    fontSize: 14,
+    color: COLORS.text,
+    marginBottom: 10,
+  },
+  editErrorText: {
+    color: COLORS.red,
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 10,
+  },
 });
